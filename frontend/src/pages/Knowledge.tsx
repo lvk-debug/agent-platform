@@ -228,8 +228,8 @@ const Knowledge: React.FC = () => {
 
   return (
     <div>
-      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
-        <Title level={4} style={{ margin: 0 }}>
+      <div className="mb-4 flex justify-between">
+        <Title level={4} className="m-0">
           知识库
         </Title>
         <Space>
@@ -253,7 +253,7 @@ const Knowledge: React.FC = () => {
           pagination={false}
         />
         {hasMore && (
-          <div style={{ textAlign: 'center', marginTop: 16 }}>
+          <div className="text-center mt-4">
             <Button
               icon={<DownOutlined />}
               loading={loading}

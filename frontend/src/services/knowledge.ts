@@ -39,6 +39,8 @@ export interface DocumentData {
   status: 'pending' | 'processing' | 'completed' | 'failed'
   chunk_count: number
   error_message?: string
+  source_type: string
+  url?: string
   created_at: string
   processed_at?: string
 }
@@ -53,6 +55,8 @@ export interface DocumentSegmentData {
   created_at: string
 }
 
+export type SearchMode = 'vector' | 'bm25' | 'rrf'
+
 export interface SearchResultItem {
   segment_id: number
   document_id: number
@@ -60,12 +64,21 @@ export interface SearchResultItem {
   content: string
   score: number
   metadata?: Record<string, any>
+  vector_score?: number
+  bm25_score?: number
 }
 
 export interface SearchResponse {
   query: string
   results: SearchResultItem[]
   total: number
+  search_mode: SearchMode
+}
+
+export interface CrawlResponse {
+  message: string
+  total_pages: number
+  document_ids: number[]
 }
 
 export const knowledgeApi = {
@@ -126,11 +139,21 @@ export const knowledgeApi = {
   },
 
   // 知识库检索
-  searchKnowledgeBase: (kbId: number, query: string, top_k?: number, score_threshold?: number) => {
+  searchKnowledgeBase: (kbId: number, query: string, top_k?: number, score_threshold?: number, search_mode?: SearchMode) => {
     return api.post<SearchResponse>(`/knowledge/${kbId}/search`, {
       query,
       top_k: top_k ?? 5,
       score_threshold: score_threshold ?? 0,
+      search_mode: search_mode ?? 'rrf',
+    })
+  },
+
+  // URL 爬取
+  crawlUrl: (kbId: number, url: string, max_depth?: number, max_pages?: number) => {
+    return api.post<CrawlResponse>(`/knowledge/${kbId}/crawl`, {
+      url,
+      max_depth: max_depth ?? 3,
+      max_pages: max_pages ?? 50,
     })
   },
 }

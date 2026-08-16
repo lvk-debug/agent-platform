@@ -14,6 +14,10 @@ import {
   Statistic,
   Row,
   Col,
+  Modal,
+  Form,
+  Input,
+  InputNumber,
 } from 'antd'
 import {
   ArrowLeftOutlined,
@@ -28,6 +32,7 @@ import {
   SyncOutlined,
   ClockCircleOutlined,
   DownOutlined,
+  LinkOutlined,
 } from '@ant-design/icons'
 import {
   knowledgeApi,
@@ -55,6 +60,11 @@ const KnowledgeDetail: React.FC = () => {
   // 分段抽屉
   const [segmentDrawerVisible, setSegmentDrawerVisible] = useState(false)
   const [selectedDoc, setSelectedDoc] = useState<DocumentData | null>(null)
+
+  // URL 爬取
+  const [crawlModalVisible, setCrawlModalVisible] = useState(false)
+  const [crawlLoading, setCrawlLoading] = useState(false)
+  const [crawlForm] = Form.useForm()
 
   useEffect(() => {
     if (kbId) {
@@ -137,6 +147,26 @@ const KnowledgeDetail: React.FC = () => {
     }
   }
 
+  const handleCrawl = async () => {
+    try {
+      const values = await crawlForm.validateFields()
+      setCrawlLoading(true)
+      await knowledgeApi.crawlUrl(kbId, values.url, values.max_depth, values.max_pages)
+      message.success('爬取任务已提交，后台处理中...')
+      setCrawlModalVisible(false)
+      crawlForm.resetFields()
+      // 刷新文档列表
+      setTimeout(() => {
+        fetchDocuments(true)
+        fetchKB()
+      }, 1000)
+    } catch {
+      // validation error or API error
+    } finally {
+      setCrawlLoading(false)
+    }
+  }
+
   const handleViewSegments = (doc: DocumentData) => {
     setSelectedDoc(doc)
     setSegmentDrawerVisible(true)
@@ -182,8 +212,12 @@ const KnowledgeDetail: React.FC = () => {
       key: 'name',
       render: (text: string, record: DocumentData) => (
         <Space>
-          <FileTextOutlined />
-          <Text>{text}</Text>
+          {record.source_type === 'url' ? <LinkOutlined /> : <FileTextOutlined />}
+          {record.url ? (
+            <a href={record.url} target="_blank" rel="noopener noreferrer">{text}</a>
+          ) : (
+            <Text>{text}</Text>
+          )}
           {getFileTypeTag(record.file_type)}
         </Space>
       ),
@@ -273,33 +307,33 @@ const KnowledgeDetail: React.FC = () => {
   return (
     <div>
       {/* 顶部导航 */}
-      <div style={{ marginBottom: 16 }}>
+      <div className="mb-4">
         <Button
           type="link"
           icon={<ArrowLeftOutlined />}
           onClick={() => navigate('/knowledge')}
-          style={{ padding: 0 }}
+          className="p-0"
         >
           返回知识库列表
         </Button>
       </div>
 
       {/* 知识库信息 */}
-      <Card style={{ marginBottom: 16 }}>
+      <Card className="mb-4">
         <Row gutter={24}>
           <Col span={16}>
-            <Title level={4} style={{ margin: 0 }}>
-              <DatabaseOutlined style={{ marginRight: 8 }} />
+            <Title level={4} className="m-0">
+              <DatabaseOutlined className="mr-2" />
               {kb.name}
               <Tag
                 color={kb.status === 'active' ? 'success' : 'default'}
-                style={{ marginLeft: 12 }}
+                className="ml-3"
               >
                 {kb.status === 'active' ? '正常' : kb.status}
               </Tag>
             </Title>
             {kb.description && (
-              <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+              <Text type="secondary" className="block mt-2">
                 {kb.description}
               </Text>
             )}
@@ -321,16 +355,21 @@ const KnowledgeDetail: React.FC = () => {
       <Card
         title="文档管理"
         extra={
-          <Upload
-            beforeUpload={handleUpload}
-            showUploadList={false}
-            accept=".pdf,.xlsx,.xls,.md,.docx,.html,.txt"
-            disabled={uploading}
-          >
-            <Button type="primary" icon={<UploadOutlined />} loading={uploading}>
-              上传文档
+          <Space>
+            <Button icon={<LinkOutlined />} onClick={() => setCrawlModalVisible(true)}>
+              爬取URL
             </Button>
-          </Upload>
+            <Upload
+              beforeUpload={handleUpload}
+              showUploadList={false}
+              accept=".pdf,.xlsx,.xls,.md,.docx,.html,.txt,.epub"
+              disabled={uploading}
+            >
+              <Button type="primary" icon={<UploadOutlined />} loading={uploading}>
+                上传文档
+              </Button>
+            </Upload>
+          </Space>
         }
       >
         <Table
@@ -341,7 +380,7 @@ const KnowledgeDetail: React.FC = () => {
           pagination={false}
         />
         {hasMore && (
-          <div style={{ textAlign: 'center', marginTop: 16 }}>
+          <div className="text-center mt-4">
             <Button
               icon={<DownOutlined />}
               loading={loading}
@@ -369,6 +408,53 @@ const KnowledgeDetail: React.FC = () => {
           docName={selectedDoc.name}
         />
       )}
+
+      {/* 爬取 URL 弹窗 */}
+      <Modal
+        title="爬取网站内容"
+        open={crawlModalVisible}
+        onOk={handleCrawl}
+        onCancel={() => {
+          setCrawlModalVisible(false)
+          crawlForm.resetFields()
+        }}
+        confirmLoading={crawlLoading}
+        okText="开始爬取"
+        cancelText="取消"
+      >
+        <Form form={crawlForm} layout="vertical" initialValues={{ max_depth: 3, max_pages: 50 }}>
+          <Form.Item
+            name="url"
+            label="网站 URL"
+            rules={[
+              { required: true, message: '请输入 URL' },
+              { type: 'url', message: '请输入有效的 URL' },
+            ]}
+          >
+            <Input placeholder="https://example.com" />
+          </Form.Item>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item
+                name="max_depth"
+                label="最大深度"
+                rules={[{ required: true, message: '请设置爬取深度' }]}
+              >
+                <InputNumber min={0} max={30} className="w-full" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item
+                name="max_pages"
+                label="最大页数"
+                rules={[{ required: true, message: '请设置最大页数' }]}
+              >
+                <InputNumber min={1} max={500} className="w-full" />
+              </Form.Item>
+            </Col>
+          </Row>
+        </Form>
+      </Modal>
     </div>
   )
 }

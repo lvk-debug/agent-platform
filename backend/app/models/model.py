@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Integer, String, Text, JSON
+from sqlalchemy import Boolean, Column, DateTime, Enum, Float, ForeignKey, Integer, String, Text, JSON
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -55,8 +55,8 @@ class Model(Base):
     supports_function_calling = Column(Boolean, default=False)
 
     # 模型参数默认值
-    default_temperature = Column(Integer, default=70)  # 0-100, 实际值除以100
-    default_max_tokens = Column(Integer, default=4096)
+    default_temperature = Column(Float, default=0.7)
+    default_max_tokens = Column(Integer, default=2048)
 
     # 状态
     is_active = Column(Boolean, default=True)

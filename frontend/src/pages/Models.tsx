@@ -12,10 +12,6 @@ import {
   App,
   Popconfirm,
   Typography,
-  Row,
-  Col,
-  Tabs,
-  Empty,
 } from 'antd'
 import {
   PlusOutlined,
@@ -24,19 +20,21 @@ import {
   SettingOutlined,
   ApiOutlined,
 } from '@ant-design/icons'
-import { modelsApi, ModelProviderData, CreateModelProviderData, ModelData } from '../services/models'
+import { useNavigate } from 'react-router-dom'
+import { modelsApi, ModelProviderData, CreateModelProviderData } from '../services/models'
 
 const { Title, Text } = Typography
 const { Option } = Select
-const { TabPane } = Tabs
 
 const Models: React.FC = () => {
+  const navigate = useNavigate()
   const [providers, setProviders] = useState<ModelProviderData[]>([])
-  const [models, setModels] = useState<ModelData[]>([])
   const [loading, setLoading] = useState(false)
-  const [createProviderModalVisible, setCreateProviderModalVisible] = useState(false)
+  const [createModalVisible, setCreateModalVisible] = useState(false)
+  const [editModalVisible, setEditModalVisible] = useState(false)
+  const [editingProvider, setEditingProvider] = useState<ModelProviderData | null>(null)
   const [createForm] = Form.useForm()
-  const [selectedProvider, setSelectedProvider] = useState<ModelProviderData | null>(null)
+  const [editForm] = Form.useForm()
   const { message } = App.useApp()
 
   useEffect(() => {
@@ -55,20 +53,11 @@ const Models: React.FC = () => {
     }
   }
 
-  const fetchModels = async (providerId: number) => {
-    try {
-      const response = await modelsApi.getModels(providerId)
-      setModels(response.data)
-    } catch (error) {
-      message.error('获取模型列表失败')
-    }
-  }
-
-  const handleCreateProvider = async (values: CreateModelProviderData) => {
+  const handleCreate = async (values: CreateModelProviderData) => {
     try {
       await modelsApi.createProvider(values)
       message.success('模型供应商创建成功')
-      setCreateProviderModalVisible(false)
+      setCreateModalVisible(false)
       createForm.resetFields()
       fetchProviders()
     } catch (error) {
@@ -76,7 +65,42 @@ const Models: React.FC = () => {
     }
   }
 
-  // 供应商类型中文名
+  const handleEdit = (record: ModelProviderData) => {
+    setEditingProvider(record)
+    editForm.setFieldsValue({
+      name: record.name,
+      api_endpoint: record.api_endpoint,
+    })
+    setEditModalVisible(true)
+  }
+
+  const handleUpdate = async (values: any) => {
+    if (!editingProvider) return
+    try {
+      await modelsApi.updateProvider(editingProvider.id, values)
+      message.success('更新成功')
+      setEditModalVisible(false)
+      setEditingProvider(null)
+      fetchProviders()
+    } catch (error) {
+      message.error('更新失败')
+    }
+  }
+
+  const handleDelete = async (id: number) => {
+    try {
+      await modelsApi.deleteProvider(id)
+      message.success('删除成功')
+      fetchProviders()
+    } catch (error) {
+      message.error('删除失败')
+    }
+  }
+
+  const handleManageModels = (record: ModelProviderData) => {
+    navigate(`/models/${record.id}`)
+  }
+
   const getProviderTypeName = (type: string) => {
     const names: Record<string, string> = {
       openai: 'OpenAI',
@@ -87,7 +111,6 @@ const Models: React.FC = () => {
     return names[type] || type
   }
 
-  // 供应商类型颜色
   const getProviderTypeColor = (type: string) => {
     const colors: Record<string, string> = {
       openai: 'green',
@@ -98,8 +121,7 @@ const Models: React.FC = () => {
     return colors[type] || 'default'
   }
 
-  // 供应商表格列
-  const providerColumns = [
+  const columns = [
     {
       title: '供应商名称',
       dataIndex: 'name',
@@ -119,11 +141,13 @@ const Models: React.FC = () => {
       dataIndex: 'api_endpoint',
       key: 'api_endpoint',
       ellipsis: true,
+      render: (text: string) => text || '-',
     },
     {
       title: '状态',
       dataIndex: 'is_active',
       key: 'is_active',
+      width: 100,
       render: (active: boolean) => (
         <Tag color={active ? 'success' : 'default'}>
           {active ? '启用' : '停用'}
@@ -133,155 +157,82 @@ const Models: React.FC = () => {
     {
       title: '操作',
       key: 'action',
-      width: 200,
+      width: 350,
       render: (_: any, record: ModelProviderData) => (
         <Space>
           <Button
             type="link"
             icon={<SettingOutlined />}
-            onClick={() => {
-              setSelectedProvider(record)
-              fetchModels(record.id)
-            }}
+            onClick={() => handleManageModels(record)}
           >
             管理模型
           </Button>
+          <Button
+            type="link"
+            icon={<EditOutlined />}
+            onClick={() => handleEdit(record)}
+          >
+            编辑
+          </Button>
+          <Popconfirm
+            title="确定要删除该供应商吗？"
+            onConfirm={() => handleDelete(record.id)}
+            okText="确定"
+            cancelText="取消"
+          >
+            <Button type="link" danger icon={<DeleteOutlined />}>
+              删除
+            </Button>
+          </Popconfirm>
         </Space>
-      ),
-    },
-  ]
-
-  // 模型表格列
-  const modelColumns = [
-    {
-      title: '模型名称',
-      dataIndex: 'name',
-      key: 'name',
-      render: (text: string, record: ModelData) => (
-        <Space>
-          <Text strong>{text}</Text>
-          <Text type="secondary">({record.model_id})</Text>
-        </Space>
-      ),
-    },
-    {
-      title: '描述',
-      dataIndex: 'description',
-      key: 'description',
-      ellipsis: true,
-    },
-    {
-      title: '最大Token',
-      dataIndex: 'max_tokens',
-      key: 'max_tokens',
-      width: 100,
-    },
-    {
-      title: '流式输出',
-      dataIndex: 'supports_streaming',
-      key: 'supports_streaming',
-      render: (supports: boolean) => (
-        <Tag color={supports ? 'success' : 'default'}>
-          {supports ? '支持' : '不支持'}
-        </Tag>
-      ),
-    },
-    {
-      title: '函数调用',
-      dataIndex: 'supports_function_calling',
-      key: 'supports_function_calling',
-      render: (supports: boolean) => (
-        <Tag color={supports ? 'success' : 'default'}>
-          {supports ? '支持' : '不支持'}
-        </Tag>
-      ),
-    },
-    {
-      title: '状态',
-      dataIndex: 'is_active',
-      key: 'is_active',
-      render: (active: boolean) => (
-        <Tag color={active ? 'success' : 'default'}>
-          {active ? '启用' : '停用'}
-        </Tag>
       ),
     },
   ]
 
   return (
     <div>
-      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
-        <Title level={4} style={{ margin: 0 }}>
-          模型管理
+      <div className="mb-4 flex justify-between">
+        <Title level={4} className="m-0">
+          模型供应商管理
         </Title>
         <Button
           type="primary"
           icon={<PlusOutlined />}
-          onClick={() => setCreateProviderModalVisible(true)}
+          onClick={() => {
+            createForm.resetFields()
+            createForm.setFieldsValue({ provider_type: 'openai' })
+            setCreateModalVisible(true)
+          }}
         >
           添加供应商
         </Button>
       </div>
 
-      <Row gutter={[16, 16]}>
-        {/* 供应商列表 */}
-        <Col xs={24} lg={selectedProvider ? 10 : 24}>
-          <Card title="模型供应商">
-            <Table
-              columns={providerColumns}
-              dataSource={providers}
-              rowKey="id"
-              loading={loading}
-              pagination={false}
-              size="small"
-            />
-          </Card>
-        </Col>
-
-        {/* 模型列表 */}
-        {selectedProvider && (
-          <Col xs={24} lg={14}>
-            <Card
-              title={`${selectedProvider.name} - 模型列表`}
-              extra={
-                <Button
-                  type="link"
-                  onClick={() => setSelectedProvider(null)}
-                >
-                  关闭
-                </Button>
-              }
-            >
-              <Table
-                columns={modelColumns}
-                dataSource={models}
-                rowKey="id"
-                pagination={false}
-                size="small"
-                locale={{
-                  emptyText: <Empty description="暂无模型" />,
-                }}
-              />
-            </Card>
-          </Col>
-        )}
-      </Row>
+      <Card>
+        <Table
+          columns={columns}
+          dataSource={providers}
+          rowKey="id"
+          loading={loading}
+          pagination={false}
+        />
+      </Card>
 
       {/* 创建供应商弹窗 */}
       <Modal
         title="添加模型供应商"
-        open={createProviderModalVisible}
+        open={createModalVisible}
         onCancel={() => {
-          setCreateProviderModalVisible(false)
+          setCreateModalVisible(false)
           createForm.resetFields()
         }}
         footer={null}
+        width={500}
       >
         <Form
           form={createForm}
           layout="vertical"
-          onFinish={handleCreateProvider}
-          initialValues={{ provider_type: 'openai' }}
+          onFinish={handleCreate}
         >
           <Form.Item
             name="name"
@@ -313,10 +264,7 @@ const Models: React.FC = () => {
             {({ getFieldValue }) =>
               getFieldValue('provider_type') !== 'local' && (
                 <>
-                  <Form.Item
-                    name="api_endpoint"
-                    label="API地址"
-                  >
+                  <Form.Item name="api_endpoint" label="API地址">
                     <Input placeholder="请输入API地址（可选，使用默认地址）" />
                   </Form.Item>
 
@@ -337,12 +285,52 @@ const Models: React.FC = () => {
               <Button type="primary" htmlType="submit">
                 添加
               </Button>
-              <Button
-                onClick={() => {
-                  setCreateProviderModalVisible(false)
-                  createForm.resetFields()
-                }}
-              >
+              <Button onClick={() => setCreateModalVisible(false)}>
+                取消
+              </Button>
+            </Space>
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 编辑供应商弹窗 */}
+      <Modal
+        title="编辑模型供应商"
+        open={editModalVisible}
+        onCancel={() => {
+          setEditModalVisible(false)
+          setEditingProvider(null)
+        }}
+        footer={null}
+        width={500}
+      >
+        <Form
+          form={editForm}
+          layout="vertical"
+          onFinish={handleUpdate}
+        >
+          <Form.Item
+            name="name"
+            label="供应商名称"
+            rules={[{ required: true, message: '请输入供应商名称' }]}
+          >
+            <Input placeholder="请输入供应商名称" />
+          </Form.Item>
+
+          <Form.Item name="api_endpoint" label="API地址">
+            <Input placeholder="请输入API地址" />
+          </Form.Item>
+
+          <Form.Item name="api_key" label="API Key">
+            <Input.Password placeholder="留空则不修改" />
+          </Form.Item>
+
+          <Form.Item>
+            <Space>
+              <Button type="primary" htmlType="submit">
+                保存
+              </Button>
+              <Button onClick={() => setEditModalVisible(false)}>
                 取消
               </Button>
             </Space>

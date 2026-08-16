@@ -63,9 +63,29 @@ export const modelsApi = {
     return api.put<ModelProviderData>(`/models/providers/${id}`, data)
   },
 
+  // 删除供应商
+  deleteProvider: (id: number) => {
+    return api.delete(`/models/providers/${id}`)
+  },
+
   // 获取供应商下的模型列表
   getModels: (providerId: number) => {
     return api.get<ModelData[]>(`/models/providers/${providerId}/models`)
+  },
+
+  // 创建模型
+  createModel: (providerId: number, data: Partial<ModelData>) => {
+    return api.post<ModelData>(`/models/providers/${providerId}/models`, data)
+  },
+
+  // 更新模型
+  updateModel: (providerId: number, modelId: number, data: Partial<ModelData>) => {
+    return api.put<ModelData>(`/models/providers/${providerId}/models/${modelId}`, data)
+  },
+
+  // 删除模型
+  deleteModel: (providerId: number, modelId: number) => {
+    return api.delete(`/models/providers/${providerId}/models/${modelId}`)
   },
 
   // 获取所有可用模型

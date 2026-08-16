@@ -213,7 +213,13 @@ const Apps: React.FC = () => {
           <Button
             type="link"
             icon={<EditOutlined />}
-            onClick={() => navigate(`/apps/${record.id}`)}
+            onClick={() => {
+              if (record.app_type === 'chatbot') {
+                navigate(`/apps/${record.id}/chatbot`)
+              } else {
+                navigate(`/apps/${record.id}`)
+              }
+            }}
           >
             编辑
           </Button>
@@ -243,8 +249,8 @@ const Apps: React.FC = () => {
 
   return (
     <div>
-      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
-        <Title level={4} style={{ margin: 0 }}>
+      <div className="mb-4 flex justify-between">
+        <Title level={4} className="m-0">
           工作室
         </Title>
         <Button
@@ -257,7 +263,7 @@ const Apps: React.FC = () => {
       </div>
 
       {/* 筛选栏 */}
-      <Card style={{ marginBottom: 16 }}>
+      <Card className="mb-4">
         <Row gutter={16}>
           <Col xs={24} sm={8}>
             <Input
@@ -275,7 +281,7 @@ const Apps: React.FC = () => {
           <Col xs={24} sm={8}>
             <Select
               placeholder="应用类型"
-              style={{ width: '100%' }}
+              className="w-full"
               allowClear
               value={appType}
               onChange={(value) => setAppType(value)}
@@ -288,7 +294,7 @@ const Apps: React.FC = () => {
           <Col xs={24} sm={8}>
             <Select
               placeholder="状态"
-              style={{ width: '100%' }}
+              className="w-full"
               allowClear
               value={status}
               onChange={(value) => setStatus(value)}
@@ -311,7 +317,7 @@ const Apps: React.FC = () => {
           pagination={false}
         />
         {hasMore && (
-          <div style={{ textAlign: 'center', marginTop: 16 }}>
+          <div className="text-center mt-4">
             <Button
               icon={<DownOutlined />}
               loading={loading}

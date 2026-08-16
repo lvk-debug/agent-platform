@@ -7,9 +7,9 @@
   line-height: 1.5;
   font-weight: 400;
 
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+  color-scheme: light;
+  color: #333333;
+  background-color: #f5f5f5;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -58,4 +58,25 @@ body {
 
 .ant-layout-sider {
   box-shadow: 2px 0 8px rgba(0, 0, 0, 0.05);
+}
+
+/* 可复用组件类 */
+@layer components {
+  .bg-gradient-primary {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  }
+
+  .chat-bubble-user {
+    @apply bg-primary text-white rounded-bubble rounded-tr-sm;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  }
+
+  .chat-bubble-assistant {
+    @apply bg-white text-gray-800 rounded-bubble rounded-tl-sm;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  }
+
+  .page-container {
+    @apply bg-page rounded-lg;
+  }
 }

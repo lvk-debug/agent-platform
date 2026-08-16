@@ -108,6 +108,7 @@ class LLMService:
         api_key = config.get("api_key")
 
         async with httpx.AsyncClient() as client:
+            logger.info(f"调用 OpenAI API: endpoint={api_endpoint}, model={model}")
             response = await client.post(
                 f"{api_endpoint}/chat/completions",
                 headers={
@@ -123,6 +124,9 @@ class LLMService:
                 },
                 timeout=60.0,
             )
+            logger.info(f"OpenAI API 响应状态: {response.status_code}")
+            if response.status_code != 200:
+                logger.error(f"OpenAI API 错误: {response.text}")
             response.raise_for_status()
             data = response.json()
 

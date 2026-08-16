@@ -67,6 +67,8 @@ class DocumentResponse(DocumentBase):
     status: str
     chunk_count: int
     error_message: Optional[str] = None
+    source_type: str = "file"
+    url: Optional[str] = None
     created_at: datetime
     processed_at: Optional[datetime] = None
 
@@ -97,6 +99,7 @@ class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=1000)
     top_k: int = Field(default=5, ge=1, le=50)
     score_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
+    search_mode: str = Field(default="rrf", pattern="^(vector|bm25|rrf)$")
 
 
 class SearchResultItem(BaseModel):
@@ -109,6 +112,8 @@ class SearchResultItem(BaseModel):
     content: str
     score: float
     metadata: Optional[Dict[str, Any]] = None
+    vector_score: Optional[float] = None
+    bm25_score: Optional[float] = None
 
 
 class SearchResponse(BaseModel):
@@ -118,3 +123,24 @@ class SearchResponse(BaseModel):
     query: str
     results: List[SearchResultItem]
     total: int
+    search_mode: str
+
+
+# --- URL 爬取 ---
+
+class CrawlRequest(BaseModel):
+    """
+    URL 爬取请求Schema
+    """
+    url: str = Field(..., description="起始 URL")
+    max_depth: int = Field(default=3, ge=0, le=30, description="最大爬取深度")
+    max_pages: int = Field(default=50, ge=1, le=500, description="最大爬取页面数")
+
+
+class CrawlResponse(BaseModel):
+    """
+    URL 爬取响应Schema
+    """
+    message: str
+    total_pages: int
+    document_ids: List[int]

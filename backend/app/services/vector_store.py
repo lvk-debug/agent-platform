@@ -66,8 +66,8 @@ class FastEmbedEmbeddings(Embeddings):
             logger.info("fastembed embedding 模型已加载")
         return self._embedder
 
-    # 大多数 fastembed 模型的 max_seq_length 为 512 tokens
-    # 中文约 1-2 字符/token，保守截断到 800 字符
+    # BGE-small-zh max_length=512 tokens，中文 1字≈1~2 tokens
+    # chunk_size=500 字符，800 留足余量避免截断表格数据
     MAX_CHARS = 800
     # 每批处理的文本数，控制 ONNX 内存峰值
     BATCH_SIZE = 8
@@ -128,12 +128,28 @@ class VectorStoreService:
         """获取知识库 collection 名称"""
         return f"kb_{kb_id}"
 
+    def _get_fts_table_name(self, kb_id: int) -> str:
+        """获取 FTS5 虚拟表名称"""
+        return f"kb_{kb_id}_fts"
+
+    def _ensure_fts_table(self, kb_id: int) -> None:
+        """确保 FTS5 虚拟表已创建"""
+        store = self.get_store(kb_id)
+        fts_table = self._get_fts_table_name(kb_id)
+        store._connection.execute(
+            f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS {fts_table}
+            USING fts5(content, metadata, segment_id UNINDEXED)
+            """
+        )
+        store._connection.commit()
+
     def get_store(self, kb_id: int) -> SQLiteVec:
         """获取或创建知识库对应的 SQLiteVec 实例"""
         if kb_id not in self._stores:
             db_file = self._get_db_path(kb_id)
             table = self._get_collection_name(kb_id)
-            connection = sqlite3.connect(db_file)
+            connection = sqlite3.connect(db_file, check_same_thread=False)
             connection.row_factory = sqlite3.Row
             connection.enable_load_extension(True)
             sqlite_vec.load(connection)
@@ -144,6 +160,7 @@ class VectorStoreService:
             )
             store._dimension = settings.EMBEDDING_DIMENSION
             self._stores[kb_id] = store
+            self._ensure_fts_table(kb_id)
             logger.info(
                 "SQLiteVec 实例已创建: kb_id=%d, db=%s, table=%s", kb_id, db_file, table
             )
@@ -157,7 +174,7 @@ class VectorStoreService:
         ids: Optional[List[str]] = None,
     ) -> List[str]:
         """
-        向知识库添加文本向量
+        向知识库添加文本向量，同时同步写入 FTS5 索引
 
         Args:
             kb_id: 知识库 ID
@@ -170,6 +187,20 @@ class VectorStoreService:
         """
         store = self.get_store(kb_id)
         vector_ids = store.add_texts(texts=texts, metadatas=metadatas, ids=ids)
+
+        # 同步写入 FTS5 表
+        import json
+
+        fts_table = self._get_fts_table_name(kb_id)
+        if metadatas is None:
+            metadatas = [{} for _ in texts]
+        for text, meta, vid in zip(texts, metadatas, vector_ids):
+            store._connection.execute(
+                f"INSERT INTO {fts_table}(content, metadata, segment_id) VALUES (?, ?, ?)",
+                (text, json.dumps(meta, ensure_ascii=False), meta.get("segment_id", "")),
+            )
+        store._connection.commit()
+
         logger.info("已添加 %d 条向量到知识库 %d", len(vector_ids), kb_id)
         return vector_ids
 
@@ -213,6 +244,58 @@ class VectorStoreService:
 
         return items
 
+    def bm25_search(
+        self,
+        kb_id: int,
+        query: str,
+        k: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """
+        BM25 全文检索（基于 FTS5）
+
+        Args:
+            kb_id: 知识库 ID
+            query: 查询文本
+            k: 返回结果数量
+
+        Returns:
+            检索结果列表，每项包含 content, metadata, score
+        """
+        store = self.get_store(kb_id)
+        fts_table = self._get_fts_table_name(kb_id)
+
+        try:
+            # FTS5 的 bm25() 函数返回负值（越小越相关），取反转为正分
+            cursor = store._connection.execute(
+                f"""
+                SELECT content, metadata, segment_id, bm25({fts_table}) AS rank
+                FROM {fts_table}
+                WHERE {fts_table} MATCH ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (query, k),
+            )
+            rows = cursor.fetchall()
+
+            items = []
+            import json
+
+            for row in rows:
+                meta = json.loads(row["metadata"]) if row["metadata"] else {}
+                # bm25 返回负值，取反使其越大越好
+                items.append(
+                    {
+                        "content": row["content"],
+                        "metadata": meta,
+                        "score": -float(row["rank"]),
+                    }
+                )
+            return items
+        except Exception as e:
+            logger.warning("BM25 检索失败 kb_id=%d: %s", kb_id, e)
+            return []
+
     def delete_by_metadata(
         self,
         kb_id: int,
@@ -220,7 +303,7 @@ class VectorStoreService:
         filter_value: str,
     ) -> int:
         """
-        按元数据条件删除向量
+        按元数据条件删除向量，同时清理 FTS5 索引
 
         Args:
             kb_id: 知识库 ID
@@ -232,6 +315,7 @@ class VectorStoreService:
         """
         store = self.get_store(kb_id)
         table = self._get_collection_name(kb_id)
+        fts_table = self._get_fts_table_name(kb_id)
         try:
             # SQLiteVec 存储表包含 rowid 和 metadata 列
             # 先查出匹配的 rowid，再删除
@@ -249,6 +333,11 @@ class VectorStoreService:
                 f"DELETE FROM {table} WHERE rowid IN ({placeholders})",
                 rowids,
             )
+            # 同步删除 FTS5 索引
+            store._connection.execute(
+                f"DELETE FROM {fts_table} WHERE segment_id IN ({placeholders})",
+                rowids,
+            )
             store._connection.commit()
             logger.info(
                 "已删除 %d 条向量 (kb_id=%d, %s=%s)",
@@ -264,7 +353,7 @@ class VectorStoreService:
 
     def delete_collection(self, kb_id: int) -> bool:
         """
-        删除整个知识库的向量数据
+        删除整个知识库的向量数据及 FTS5 索引
 
         Args:
             kb_id: 知识库 ID

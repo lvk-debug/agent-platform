@@ -62,12 +62,12 @@ const Dashboard: React.FC = () => {
 
   return (
     <div>
-      <Title level={4} style={{ marginBottom: 24 }}>
+      <Title level={4} className="mb-6">
         仪表盘
       </Title>
 
       {/* 统计卡片 */}
-      <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
+      <Row gutter={[16, 16]} className="mb-6">
         <Col xs={24} sm={12} lg={6}>
           <Card hoverable onClick={() => navigate('/apps')}>
             <Statistic
@@ -107,7 +107,7 @@ const Dashboard: React.FC = () => {
       </Row>
 
       {/* 快速操作 */}
-      <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
+      <Row gutter={[16, 16]} className="mb-6">
         <Col xs={24} lg={12}>
           <Card
             title="快速创建"
@@ -117,7 +117,7 @@ const Dashboard: React.FC = () => {
               </Button>
             }
           >
-            <Space direction="vertical" style={{ width: '100%' }}>
+            <Space direction="vertical" className="w-full">
               <Button
                 type="dashed"
                 block

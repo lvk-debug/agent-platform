@@ -66,14 +66,14 @@ const SegmentDrawer: React.FC<SegmentDrawerProps> = ({
       open={visible}
     >
       {loading && segments.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: 40 }}>
+        <div className="text-center p-10">
           <Spin tip="加载分段中..." />
         </div>
       ) : segments.length === 0 ? (
         <Empty description="暂无分段数据" />
       ) : (
         <div>
-          <Text type="secondary" style={{ marginBottom: 16, display: 'block' }}>
+          <Text type="secondary" className="mb-4 block">
             已加载 {segments.length} 个分段
           </Text>
           <Collapse accordion>
@@ -83,38 +83,29 @@ const SegmentDrawer: React.FC<SegmentDrawerProps> = ({
                 header={
                   <span>
                     <Tag color="blue">#{index + 1}</Tag>
-                    <Text ellipsis style={{ maxWidth: 360 }}>
+                    <Text ellipsis className="max-w-[360px]">
                       {seg.content.slice(0, 80)}...
                     </Text>
                     {seg.token_count && (
-                      <Tag style={{ marginLeft: 8 }}>{seg.token_count} 字符</Tag>
+                      <Tag className="ml-2">{seg.token_count} 字符</Tag>
                     )}
                   </span>
                 }
               >
-                <div style={{ marginBottom: 8 }}>
+                <div className="mb-2">
                   {seg.metadata_?.header_path && (
                     <Tag color="purple">{seg.metadata_.header_path}</Tag>
                   )}
                   {seg.metadata_?.has_table && <Tag color="orange">含表格</Tag>}
                 </div>
-                <Paragraph
-                  style={{
-                    whiteSpace: 'pre-wrap',
-                    background: '#f5f5f5',
-                    padding: 12,
-                    borderRadius: 6,
-                    maxHeight: 400,
-                    overflow: 'auto',
-                  }}
-                >
+                <Paragraph className="whitespace-pre-wrap bg-page p-3 rounded-md max-h-[400px] overflow-auto">
                   {seg.content}
                 </Paragraph>
               </Collapse.Panel>
             ))}
           </Collapse>
           {hasMore && (
-            <div style={{ textAlign: 'center', marginTop: 16 }}>
+            <div className="text-center mt-4">
               <Button
                 icon={<DownOutlined />}
                 loading={loading}

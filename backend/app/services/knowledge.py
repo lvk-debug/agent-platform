@@ -545,7 +545,7 @@ class KnowledgeService:
         return segments
 
     # ------------------------------------------------------------------
-    # 混合检索
+    # 检索
     # ------------------------------------------------------------------
 
     async def search(
@@ -554,85 +554,240 @@ class KnowledgeService:
         query: str,
         top_k: int = 5,
         score_threshold: float = 0.0,
+        search_mode: str = "rrf",
     ) -> List[Dict[str, Any]]:
         """
-        混合检索：SQLiteVec 向量相似度 + 关键词匹配
-        """
-        # 1. SQLiteVec 向量检索（多取一些用于混合重排）
-        vector_results = vector_store_service.similarity_search(
-            kb_id=kb_id,
-            query=query,
-            k=top_k * 3,
-        )
+        检索入口，根据 search_mode 分发到不同的检索策略
 
-        if not vector_results:
+        Args:
+            kb_id: 知识库 ID
+            query: 查询文本
+            top_k: 返回结果数量
+            score_threshold: 分数阈值
+            search_mode: 检索模式 (vector / bm25 / rrf)
+
+        Returns:
+            检索结果列表
+        """
+        if search_mode == "vector":
+            return await self._search_vector(kb_id, query, top_k, score_threshold)
+        elif search_mode == "bm25":
+            return await self._search_bm25(kb_id, query, top_k, score_threshold)
+        else:
+            return await self._search_rrf(kb_id, query, top_k, score_threshold)
+
+    async def _search_vector(
+        self,
+        kb_id: int,
+        query: str,
+        top_k: int,
+        score_threshold: float,
+    ) -> List[Dict[str, Any]]:
+        """纯向量检索（带关键词加权）"""
+        raw_results = vector_store_service.similarity_search(
+            kb_id=kb_id, query=query, k=top_k,
+        )
+        if not raw_results:
             return []
 
-        # 2. 收集 segment_id，批量查询主库补充完整信息
-        segment_ids = []
-        for item in vector_results:
+        query_lower = query.lower()
+        results = []
+        for item in raw_results:
+            # SQLiteVec 返回余弦距离，越小越相似；转换为相似度分数
+            vector_score = max(0.0, 1.0 - item["score"])
+
+            # 关键词加权：内容包含查询关键词时提升分数
+            content_lower = item["content"].lower()
+            if query_lower in content_lower:
+                # 精确包含关键词，确保分数不低于 0.5
+                vector_score = max(vector_score, 0.5)
+
+            if vector_score < score_threshold:
+                continue
             meta = item.get("metadata", {})
-            sid = meta.get("segment_id")
+            results.append({
+                "segment_id": int(meta.get("segment_id", 0)),
+                "document_id": int(meta.get("document_id", 0)),
+                "document_name": "",
+                "content": item["content"],
+                "score": round(vector_score, 4),
+                "metadata": meta,
+                "vector_score": round(vector_score, 4),
+            })
+
+        # 补充文档名
+        self._enrich_results(results)
+        return results
+
+    async def _search_bm25(
+        self,
+        kb_id: int,
+        query: str,
+        top_k: int,
+        score_threshold: float,
+    ) -> List[Dict[str, Any]]:
+        """BM25 全文检索"""
+        raw_results = vector_store_service.bm25_search(
+            kb_id=kb_id, query=query, k=top_k,
+        )
+        if not raw_results:
+            return []
+
+        # BM25 分数归一化到 0-1
+        max_score = max(r["score"] for r in raw_results) if raw_results else 1.0
+        if max_score <= 0:
+            max_score = 1.0
+
+        results = []
+        for item in raw_results:
+            bm25_score = item["score"] / max_score
+            if bm25_score < score_threshold:
+                continue
+            meta = item.get("metadata", {})
+            results.append({
+                "segment_id": int(meta.get("segment_id", 0)),
+                "document_id": int(meta.get("document_id", 0)),
+                "document_name": "",
+                "content": item["content"],
+                "score": round(bm25_score, 4),
+                "metadata": meta,
+                "bm25_score": round(bm25_score, 4),
+            })
+
+        self._enrich_results(results)
+        return results
+
+    async def _search_rrf(
+        self,
+        kb_id: int,
+        query: str,
+        top_k: int,
+        score_threshold: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        RRF (Reciprocal Rank Fusion) 混合检索
+
+        分别执行向量检索和 BM25 检索，用 RRF 公式融合排名：
+        score = Σ 1 / (k + rank_i)，k=60
+        """
+        RRF_K = 60
+        fetch_k = top_k * 3  # 多取一些用于融合
+
+        # 并行获取两种检索结果
+        vector_raw = vector_store_service.similarity_search(
+            kb_id=kb_id, query=query, k=fetch_k,
+        )
+        bm25_raw = vector_store_service.bm25_search(
+            kb_id=kb_id, query=query, k=fetch_k,
+        )
+
+        # 构建 segment_id → 排名映射 + 真实向量距离
+        vector_ranks: Dict[str, int] = {}
+        vector_distances: Dict[str, float] = {}
+        for rank, item in enumerate(vector_raw):
+            sid = item.get("metadata", {}).get("segment_id", "")
             if sid:
-                segment_ids.append(int(sid))
+                vector_ranks[sid] = rank
+                vector_distances[sid] = item["score"]  # 余弦距离
 
-        segments_map = {}
-        if segment_ids:
-            segments = (
-                self.db.query(DocumentSegment)
-                .filter(DocumentSegment.id.in_(segment_ids))
-                .all()
-            )
-            segments_map = {seg.id: seg for seg in segments}
+        bm25_ranks: Dict[str, int] = {}
+        for rank, item in enumerate(bm25_raw):
+            sid = item.get("metadata", {}).get("segment_id", "")
+            if sid:
+                bm25_ranks[sid] = rank
 
-        # 批量查询文档名
-        doc_ids = {seg.document_id for seg in segments_map.values()}
+        # 收集所有 segment_id
+        all_sids = set(vector_ranks.keys()) | set(bm25_ranks.keys())
+        if not all_sids:
+            return []
+
+        # 计算 RRF 分数
+        rrf_scores: Dict[str, float] = {}
+        for sid in all_sids:
+            score = 0.0
+            if sid in vector_ranks:
+                score += 1.0 / (RRF_K + vector_ranks[sid])
+            if sid in bm25_ranks:
+                score += 1.0 / (RRF_K + bm25_ranks[sid])
+            rrf_scores[sid] = score
+
+        # 按 RRF 分数排序
+        sorted_sids = sorted(rrf_scores.keys(), key=lambda s: rrf_scores[s], reverse=True)
+
+        # 构建 segment_id → content 映射（从原始结果中取）
+        content_map: Dict[str, str] = {}
+        for item in vector_raw:
+            sid = item.get("metadata", {}).get("segment_id", "")
+            if sid:
+                content_map[sid] = item["content"]
+        for item in bm25_raw:
+            sid = item.get("metadata", {}).get("segment_id", "")
+            if sid and sid not in content_map:
+                content_map[sid] = item["content"]
+
+        # 归一化 RRF 分数到 0-1
+        max_rrf = rrf_scores[sorted_sids[0]] if sorted_sids else 1.0
+        if max_rrf <= 0:
+            max_rrf = 1.0
+
+        results = []
+        for sid in sorted_sids[:top_k]:
+            norm_score = rrf_scores[sid] / max_rrf
+            if norm_score < score_threshold:
+                continue
+
+            # 子分数：向量用真实相似度，BM25 用 RRF 排名贡献
+            v_score = 0.0
+            if sid in vector_distances:
+                v_score = max(0.0, 1.0 - vector_distances[sid])
+                # 关键词加权：内容包含查询时确保分数不低于 0.5
+                if query.lower() in content_map.get(sid, "").lower():
+                    v_score = max(v_score, 0.5)
+            b_score = 0.0
+            if sid in bm25_ranks:
+                b_score = 1.0 / (RRF_K + bm25_ranks[sid]) / max_rrf
+
+            results.append({
+                "segment_id": int(sid),
+                "document_id": 0,
+                "document_name": "",
+                "content": content_map.get(sid, ""),
+                "score": round(norm_score, 4),
+                "metadata": {},
+                "vector_score": round(v_score, 4),
+                "bm25_score": round(b_score, 4),
+            })
+
+        self._enrich_results(results)
+        return results
+
+    def _enrich_results(self, results: List[Dict[str, Any]]) -> None:
+        """批量补充结果中的文档名称（原地修改）"""
+        segment_ids = [r["segment_id"] for r in results if r["segment_id"]]
+        if not segment_ids:
+            return
+
+        segments = (
+            self.db.query(DocumentSegment)
+            .filter(DocumentSegment.id.in_(segment_ids))
+            .all()
+        )
+        seg_map = {seg.id: seg for seg in segments}
+
+        doc_ids = {seg.document_id for seg in segments}
         docs_map = {}
         if doc_ids:
             docs = self.db.query(Document).filter(Document.id.in_(doc_ids)).all()
             docs_map = {doc.id: doc for doc in docs}
 
-        # 3. 混合打分：向量相似度 + 关键词匹配
-        query_words = set(query.lower().split())
-        results = []
-
-        for item in vector_results:
-            meta = item.get("metadata", {})
-            sid = meta.get("segment_id")
-            if not sid:
-                continue
-
-            segment = segments_map.get(int(sid))
-            if not segment:
-                continue
-
-            # 向量相似度分数（SQLiteVec 返回的距离，越小越相似，取反转为越大越好）
-            vector_score = max(0.0, 1.0 - item["score"])
-
-            # 关键词匹配加分
-            content_lower = segment.content.lower()
-            keyword_hits = sum(1 for word in query_words if word in content_lower)
-            keyword_score = keyword_hits / max(len(query_words), 1) * 0.3
-
-            # 综合分数
-            final_score = vector_score * 0.7 + keyword_score * 0.3
-
-            if final_score >= score_threshold:
-                doc = docs_map.get(segment.document_id)
-                results.append(
-                    {
-                        "segment_id": segment.id,
-                        "document_id": segment.document_id,
-                        "document_name": doc.name if doc else "",
-                        "content": segment.content,
-                        "score": round(final_score, 4),
-                        "metadata": segment.metadata_,
-                    }
-                )
-
-        # 按分数排序
-        results.sort(key=lambda x: x["score"], reverse=True)
-        return results[:top_k]
+        for r in results:
+            seg = seg_map.get(r["segment_id"])
+            if seg:
+                r["document_id"] = seg.document_id
+                r["metadata"] = seg.metadata_
+                doc = docs_map.get(seg.document_id)
+                if doc:
+                    r["document_name"] = doc.name
 
     # ------------------------------------------------------------------
     # 文档删除

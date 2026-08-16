@@ -9,7 +9,10 @@ import Apps from './pages/Apps'
 import Knowledge from './pages/Knowledge'
 import KnowledgeDetail from './pages/KnowledgeDetail'
 import Models from './pages/Models'
+import ModelDetail from './pages/ModelDetail'
 import Tools from './pages/Tools'
+import ChatbotOrchestration from './pages/ChatbotOrchestration'
+import ChatbotDebug from './pages/ChatbotDebug'
 
 // 受保护的路由组件
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -41,9 +44,12 @@ const App: React.FC = () => {
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="dashboard" element={<Dashboard />} />
         <Route path="apps" element={<Apps />} />
+        <Route path="apps/:appId/chatbot" element={<ChatbotOrchestration />} />
+        <Route path="apps/:appId/chatbot/debug" element={<ChatbotDebug />} />
         <Route path="knowledge" element={<Knowledge />} />
         <Route path="knowledge/:id" element={<KnowledgeDetail />} />
         <Route path="models" element={<Models />} />
+        <Route path="models/:providerId" element={<ModelDetail />} />
         <Route path="tools" element={<Tools />} />
       </Route>
 

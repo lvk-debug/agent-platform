@@ -82,93 +82,54 @@ const MainLayout: React.FC = () => {
     },
   ]
 
+  // 获取当前匹配的顶级菜单路径
+  const selectedKey = '/' + location.pathname.split('/').filter(Boolean)[0]
+
   // 处理菜单点击
   const handleMenuClick = ({ key }: { key: string }) => {
     navigate(key)
   }
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
+    <Layout className="min-h-screen">
       <Sider
         trigger={null}
         collapsible
         collapsed={collapsed}
-        style={{
-          overflow: 'auto',
-          height: '100vh',
-          position: 'fixed',
-          left: 0,
-          top: 0,
-          bottom: 0,
-          background: '#fff',
-        }}
+        className="overflow-auto h-screen fixed left-0 top-0 bottom-0 bg-white shadow-sider"
       >
-        <div
-          style={{
-            height: 64,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            borderBottom: '1px solid #f0f0f0',
-          }}
-        >
-          {collapsed ? (
-            <Text strong style={{ fontSize: 18 }}>
-              AP
-            </Text>
-          ) : (
-            <Text strong style={{ fontSize: 18 }}>
-              智能体平台
-            </Text>
-          )}
+        <div className="h-header flex items-center justify-center border-b border-border">
+          <Text strong className="text-lg">
+            {collapsed ? 'AP' : '智能体平台'}
+          </Text>
         </div>
         <Menu
           mode="inline"
-          selectedKeys={[location.pathname]}
+          selectedKeys={[selectedKey]}
           items={menuItems}
           onClick={handleMenuClick}
-          style={{ borderRight: 0 }}
+          className="border-r-0"
         />
       </Sider>
 
-      <Layout style={{ marginLeft: collapsed ? 80 : 200, transition: 'all 0.2s' }}>
-        <Header
-          style={{
-            padding: '0 24px',
-            background: '#fff',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            boxShadow: '0 1px 4px rgba(0, 21, 41, 0.08)',
-            position: 'sticky',
-            top: 0,
-            zIndex: 1,
-          }}
-        >
+      <Layout className={`transition-all duration-200 ${collapsed ? 'ml-20' : 'ml-sider'}`}>
+        <Header className="px-6 bg-white flex items-center justify-between shadow-header sticky top-0 z-10">
           <Button
             type="text"
             icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
             onClick={() => setCollapsed(!collapsed)}
-            style={{ fontSize: 16, width: 64, height: 64 }}
+            className="w-16 h-16 text-base"
           />
 
           <Dropdown menu={{ items: userMenuItems }} placement="bottomRight">
-            <Space style={{ cursor: 'pointer' }}>
+            <Space className="cursor-pointer">
               <Avatar icon={<UserOutlined />} />
               <Text>{user?.username || '用户'}</Text>
             </Space>
           </Dropdown>
         </Header>
 
-        <Content
-          style={{
-            margin: '24px',
-            padding: 24,
-            background: '#f5f5f5',
-            minHeight: 280,
-            borderRadius: 8,
-          }}
-        >
+        <Content className="m-3 px-4 bg-page rounded-lg min-h-[280px]">
           <Outlet />
         </Content>
       </Layout>

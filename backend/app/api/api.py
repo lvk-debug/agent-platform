@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.endpoints import users, apps, knowledge, models, tools
+from app.api.endpoints import users, apps, knowledge, models, tools, chatbot
 
 api_router = APIRouter()
 
@@ -10,3 +10,4 @@ api_router.include_router(apps.router, prefix="/apps", tags=["apps"])
 api_router.include_router(knowledge.router, prefix="/knowledge", tags=["knowledge"])
 api_router.include_router(models.router, prefix="/models", tags=["models"])
 api_router.include_router(tools.router, prefix="/tools", tags=["tools"])
+api_router.include_router(chatbot.router, prefix="/chatbot", tags=["chatbot"])

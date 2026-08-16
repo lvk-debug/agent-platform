@@ -9,6 +9,8 @@ from app.core.database import get_db
 from app.models.knowledge import Document, DocumentSegment, KnowledgeBase
 from app.models.user import User
 from app.schemas.knowledge import (
+    CrawlRequest,
+    CrawlResponse,
     DocumentResponse,
     DocumentSegmentResponse,
     KnowledgeBaseCreate,
@@ -26,7 +28,7 @@ from app.utils.pagination import apply_cursor_pagination
 
 router = APIRouter()
 
-ALLOWED_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".md", ".docx", ".html", ".txt"}
+ALLOWED_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".md", ".docx", ".html", ".txt", ".epub"}
 FILE_TYPE_MAP = {
     ".pdf": "pdf",
     ".xlsx": "excel",
@@ -35,15 +37,21 @@ FILE_TYPE_MAP = {
     ".docx": "docx",
     ".html": "html",
     ".txt": "txt",
+    ".epub": "epub",
 }
 
 
-def _process_document_task(db: Session, document_id: int):
-    """后台任务：处理文档"""
+def _process_document_task(document_id: int):
+    """后台任务：处理文档（创建独立的 db session）"""
     import asyncio
+    from app.core.database import SessionLocal
 
-    service = get_knowledge_service(db)
-    asyncio.run(service.process_document(document_id))
+    db = SessionLocal()
+    try:
+        service = get_knowledge_service(db)
+        asyncio.run(service.process_document(document_id))
+    finally:
+        db.close()
 
 
 @router.get("/", response_model=CursorResponse[KnowledgeBaseResponse])
@@ -236,7 +244,7 @@ async def upload_document(
     db.refresh(document)
 
     # 后台异步处理文档
-    background_tasks.add_task(_process_document_task, db, document.id)
+    background_tasks.add_task(_process_document_task, document.id)
 
     return document
 
@@ -385,7 +393,7 @@ async def retry_document(
     db.commit()
 
     # 后台重新处理
-    background_tasks.add_task(_process_document_task, db, doc_id)
+    background_tasks.add_task(_process_document_task, doc_id)
 
     return {"message": "文档已加入重新处理队列"}
 
@@ -398,7 +406,7 @@ async def search_knowledge_base(
     kb_id: int,
     search_in: SearchRequest,
 ) -> Any:
-    """知识库检索（混合向量 + 关键词）"""
+    """知识库检索（支持 vector / bm25 / rrf 三种模式）"""
     # 验证知识库归属
     knowledge_base = (
         db.query(KnowledgeBase)
@@ -414,10 +422,100 @@ async def search_knowledge_base(
         query=search_in.query,
         top_k=search_in.top_k,
         score_threshold=search_in.score_threshold,
+        search_mode=search_in.search_mode,
     )
 
     return SearchResponse(
         query=search_in.query,
         results=[SearchResultItem(**r) for r in results],
         total=len(results),
+        search_mode=search_in.search_mode,
+    )
+
+
+# ------------------------------------------------------------------
+# URL 爬取
+# ------------------------------------------------------------------
+
+def _crawl_and_process_task(kb_id: int, crawl_request: CrawlRequest):
+    """后台任务：爬取 URL → 创建文档 → 处理分段（创建独立的 db session）"""
+    import asyncio
+    from app.core.database import SessionLocal
+    from app.services.crawler import WebCrawler
+    from app.services.knowledge import KnowledgeService
+
+    async def _run():
+        crawler = WebCrawler()
+        result = await crawler.crawl(
+            start_url=crawl_request.url,
+            max_depth=crawl_request.max_depth,
+            max_pages=crawl_request.max_pages,
+        )
+        return result
+
+    crawl_result = asyncio.run(_run())
+
+    db = SessionLocal()
+    try:
+        service = KnowledgeService(db)
+        doc_ids = []
+
+        for page in crawl_result.pages:
+            document = Document(
+                knowledge_base_id=kb_id,
+                name=page.title[:200] if page.title else page.url[:200],
+                file_type="txt",
+                source_type="url",
+                url=page.url,
+                file_size=len(page.content.encode("utf-8")),
+                status="pending",
+                content=page.content,
+            )
+            db.add(document)
+            db.flush()
+
+            try:
+                service.process_document(document.id)
+                doc_ids.append(document.id)
+            except Exception as e:
+                document.status = "failed"
+                document.error_message = str(e)[:500]
+                db.commit()
+
+        db.commit()
+    finally:
+        db.close()
+
+
+@router.post("/{kb_id}/crawl", response_model=CrawlResponse)
+async def crawl_url(
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    kb_id: int,
+    crawl_in: CrawlRequest,
+    background_tasks: BackgroundTasks,
+) -> Any:
+    """爬取网站内容并导入知识库"""
+    # 验证知识库归属
+    knowledge_base = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == kb_id, KnowledgeBase.owner_id == current_user.id)
+        .first()
+    )
+    if not knowledge_base:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    # 验证 URL 格式
+    from urllib.parse import urlparse
+    parsed = urlparse(crawl_in.url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="无效的 URL")
+
+    background_tasks.add_task(_crawl_and_process_task, kb_id, crawl_in)
+
+    return CrawlResponse(
+        message=f"已开始爬取 {crawl_in.url}，最大深度 {crawl_in.max_depth}，最多 {crawl_in.max_pages} 页",
+        total_pages=0,
+        document_ids=[],
     )

@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -6,12 +6,19 @@ from app.core.config import settings
 
 # 根据数据库类型创建引擎
 if settings.DATABASE_URL.startswith("sqlite"):
-    # SQLite配置
+    # SQLite配置: WAL模式 + busy_timeout 解决并发死锁
     engine = create_engine(
         settings.DATABASE_URL,
-        connect_args={"check_same_thread": False},  # SQLite需要这个参数
+        connect_args={"check_same_thread": False},
         echo=settings.DEBUG,
     )
+
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.close()
 else:
     # PostgreSQL配置
     engine = create_engine(

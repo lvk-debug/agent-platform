@@ -312,8 +312,8 @@ const Tools: React.FC = () => {
 
   return (
     <div>
-      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
-        <Title level={4} style={{ margin: 0 }}>
+      <div className="mb-4 flex justify-between">
+        <Title level={4} className="m-0">
           工具管理
         </Title>
         <Button
@@ -326,7 +326,7 @@ const Tools: React.FC = () => {
       </div>
 
       {/* 搜索栏 */}
-      <Card style={{ marginBottom: 16 }}>
+      <Card className="mb-4">
         <Input
           placeholder="搜索工具名称或描述"
           prefix={<SearchOutlined />}

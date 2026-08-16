@@ -27,24 +27,10 @@ const Login: React.FC = () => {
   }
 
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        justifyContent: 'center',
-        alignItems: 'center',
-        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-      }}
-    >
-      <Card
-        style={{
-          width: 400,
-          borderRadius: 12,
-          boxShadow: '0 8px 24px rgba(0, 0, 0, 0.15)',
-        }}
-      >
-        <div style={{ textAlign: 'center', marginBottom: 32 }}>
-          <Title level={2} style={{ marginBottom: 8 }}>
+    <div className="min-h-screen flex justify-center items-center bg-gradient-primary">
+      <Card className="w-[400px] rounded-card shadow-card">
+        <div className="text-center mb-8">
+          <Title level={2} className="mb-2">
             智能体平台
           </Title>
           <Text type="secondary">登录您的账号</Text>
@@ -89,17 +75,13 @@ const Login: React.FC = () => {
               htmlType="submit"
               loading={isLoading}
               block
-              style={{
-                height: 48,
-                borderRadius: 8,
-                fontSize: 16,
-              }}
+              className="h-12 rounded-button text-base"
             >
               登录
             </Button>
           </Form.Item>
 
-          <Form.Item style={{ textAlign: 'center', marginBottom: 0 }}>
+          <Form.Item className="text-center mb-0">
             <Space>
               <Text type="secondary">还没有账号？</Text>
               <Link to="/register">立即注册</Link>

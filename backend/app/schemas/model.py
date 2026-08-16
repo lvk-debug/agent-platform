@@ -55,6 +55,33 @@ class ModelBase(BaseModel):
     description: Optional[str] = None
 
 
+class ModelCreate(ModelBase):
+    """
+    模型创建Schema
+    """
+    max_tokens: Optional[int] = None
+    supports_streaming: bool = True
+    supports_function_calling: bool = False
+    default_temperature: float = 0.7
+    default_max_tokens: int = 2048
+    is_active: bool = True
+
+
+class ModelUpdate(BaseModel):
+    """
+    模型更新Schema
+    """
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    model_id: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = None
+    max_tokens: Optional[int] = None
+    supports_streaming: Optional[bool] = None
+    supports_function_calling: Optional[bool] = None
+    default_temperature: Optional[float] = None
+    default_max_tokens: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
 class ModelResponse(ModelBase):
     """
     模型响应Schema
@@ -64,7 +91,7 @@ class ModelResponse(ModelBase):
     max_tokens: Optional[int] = None
     supports_streaming: bool
     supports_function_calling: bool
-    default_temperature: int
+    default_temperature: float
     default_max_tokens: int
     is_active: bool
     created_at: datetime

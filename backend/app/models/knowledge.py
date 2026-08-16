@@ -61,10 +61,12 @@ class Document(Base):
     name = Column(String(255), nullable=False)
     file_path = Column(String(500), nullable=True)
     file_type = Column(
-        Enum("pdf", "excel", "markdown", "docx", "html", "txt", name="file_type_enum"),
+        Enum("pdf", "excel", "markdown", "docx", "html", "txt", "epub", name="file_type_enum"),
         nullable=False
     )
     file_size = Column(Integer, nullable=True)  # 字节
+    source_type = Column(String(20), default="file")  # "file" 或 "url"
+    url = Column(String(2000), nullable=True)  # 爬取来源 URL
 
     # 文档处理状态
     status = Column(

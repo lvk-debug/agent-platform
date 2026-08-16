@@ -59,7 +59,7 @@ cd backend
 pip install -e ".[dev,sqlite]"
 
 # 启动服务
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --reload-exclude "test/"
 ```
 
 访问 API文档: http://localhost:8000/docs
