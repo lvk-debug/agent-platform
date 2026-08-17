@@ -49,6 +49,12 @@ export interface ChatbotConfig {
   memory_enabled: boolean;
   memory_window: number;
   metadata_filter_enabled: boolean;
+  // HyDE 假设性文档嵌入
+  hyde_enabled: boolean;
+  hyde_prompt?: string;
+  // Query 扩展
+  query_expansion_enabled: boolean;
+  query_expansion_prompt?: string;
 }
 
 export interface ChatRequest {

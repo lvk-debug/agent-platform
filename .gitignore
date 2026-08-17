@@ -35,6 +35,8 @@ Thumbs.db
 
 # Backend
 backend/*.db
+backend/*.db-shm
+backend/*.db-wal
 backend/uploads/
 backend/temp/
 backend/logs/
