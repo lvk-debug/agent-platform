@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 from collections import Counter
@@ -20,12 +21,12 @@ class KnowledgeService:
         self.db = db
 
     # ------------------------------------------------------------------
-    # 文档处理流水线
+    # 文档处理流水线（三步）
     # ------------------------------------------------------------------
 
-    async def process_document(self, document_id: int) -> bool:
+    async def parse_document(self, document_id: int) -> bool:
         """
-        处理文档：解析 → 分段 → 向量化 → 更新状态
+        第一步：解析文档为 Markdown，存入数据库，状态变为 parsed
         """
         document = self.db.query(Document).filter(Document.id == document_id).first()
         if not document:
@@ -48,14 +49,95 @@ class KnowledgeService:
             cleaned_text = self._clean_markdown(markdown_text)
             document.content = cleaned_text
 
-            # 3. 语义分段
+            # 更新状态为已解析
+            document.status = "parsed"
+            self.db.commit()
+
+            logger.info(f"文档解析完成: {document.name}, 内容长度: {len(cleaned_text)}")
+            return True
+
+        except Exception as e:
+            document.status = "failed"
+            document.error_message = str(e)[:500]
+            self.db.commit()
+            logger.error(f"文档解析失败: {document.name} - {e}")
+            return False
+
+    def preview_chunks(
+        self,
+        document_id: int,
+        chunk_strategy: str = "sliding_window",
+        chunk_size: int = 500,
+        chunk_overlap: int = 50,
+        separators: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        第二步：预览分片效果，不写入数据库
+        """
+        document = self.db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            raise ValueError(f"文档不存在: {document_id}")
+
+        if not document.content:
+            raise ValueError("文档内容为空，请先解析文档")
+
+        metadata = {
+            "source": document.name,
+            "file_type": document.file_type,
+        }
+
+        chunks = self._split_text_semantic(
+            document.content,
+            metadata,
+            chunk_strategy=chunk_strategy,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=separators,
+        )
+
+        return chunks
+
+    async def process_document(
+        self,
+        document_id: int,
+        chunk_strategy: str = "sliding_window",
+        chunk_size: int = 500,
+        chunk_overlap: int = 50,
+        separators: Optional[List[str]] = None,
+    ) -> bool:
+        """
+        第三步：执行分片 + 向量化，状态变为 completed
+        """
+        document = self.db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            logger.error(f"文档不存在: {document_id}")
+            return False
+
+        if not document.content:
+            logger.error(f"文档内容为空: {document_id}")
+            return False
+
+        try:
+            # 更新状态为处理中
+            document.status = "processing"
+            document.chunk_strategy = chunk_strategy
+            self.db.commit()
+
+            # 1. 语义分段
             metadata = {
                 "source": document.name,
                 "file_type": document.file_type,
             }
-            chunks = self._split_text_semantic(cleaned_text, metadata)
+            chunks = self._split_text_semantic(
+                document.content,
+                metadata,
+                chunk_strategy=chunk_strategy,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                separators=separators,
+            )
 
-            # 4. 存储分段记录到主数据库
+            # 2. 存储分段记录到主数据库
             segments = []
             for i, chunk in enumerate(chunks):
                 segment = DocumentSegment(
@@ -71,7 +153,7 @@ class KnowledgeService:
             # 刷新以获取 segment.id
             self.db.flush()
 
-            # 5. 批量写入向量到 SQLiteVec
+            # 3. 批量写入向量到 SQLiteVec
             texts = [seg.content for seg in segments]
             metadatas = [
                 {
@@ -82,7 +164,8 @@ class KnowledgeService:
                 }
                 for seg in segments
             ]
-            vector_store_service.add_texts(
+            await asyncio.to_thread(
+                vector_store_service.add_texts,
                 kb_id=document.knowledge_base_id,
                 texts=texts,
                 metadatas=metadatas,
@@ -283,11 +366,17 @@ class KnowledgeService:
         self,
         text: str,
         metadata: dict,
+        chunk_strategy: str = "sliding_window",
         chunk_size: int = 500,
         chunk_overlap: int = 50,
+        separators: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        按 Markdown 标题层级切分，表格不拆行，超长段落再用滑动窗口细分
+        按 Markdown 标题层级切分，表格不拆行，文本段落根据策略细分
+
+        Args:
+            chunk_strategy: "sliding_window" 或 "paragraph"
+            separators: 句子边界分隔符列表，None 时使用默认值
         """
         if not text:
             return []
@@ -336,11 +425,26 @@ class KnowledgeService:
                                 }
                             )
                 else:
-                    # 普通文本：滑动窗口细分
-                    if len(block["content"]) <= chunk_size:
+                    # 普通文本：根据策略细分
+                    if chunk_strategy == "paragraph":
+                        text_chunks = self._split_by_paragraph(
+                            block["content"], chunk_size, chunk_overlap,
+                            separators=separators,
+                        )
+                    else:
+                        # sliding_window 策略
+                        if len(block["content"]) <= chunk_size:
+                            text_chunks = [block["content"]]
+                        else:
+                            text_chunks = self._sliding_window_split(
+                                block["content"], chunk_size, chunk_overlap,
+                                separators=separators,
+                            )
+
+                    for tc in text_chunks:
                         chunks.append(
                             {
-                                "content": block["content"],
+                                "content": tc,
                                 "metadata": {
                                     **metadata,
                                     "header_path": header_path,
@@ -348,21 +452,6 @@ class KnowledgeService:
                                 },
                             }
                         )
-                    else:
-                        text_chunks = self._sliding_window_split(
-                            block["content"], chunk_size, chunk_overlap
-                        )
-                        for tc in text_chunks:
-                            chunks.append(
-                                {
-                                    "content": tc,
-                                    "metadata": {
-                                        **metadata,
-                                        "header_path": header_path,
-                                        "has_table": False,
-                                    },
-                                }
-                            )
 
         # 3. 编号
         for i, chunk in enumerate(chunks):
@@ -507,14 +596,22 @@ class KnowledgeService:
 
         return chunks
 
+    DEFAULT_SEPARATORS = ["。", "\n", "！", "？", ".", "!", "?", "；", ";"]
+
     def _sliding_window_split(
-        self, text: str, chunk_size: int, chunk_overlap: int
+        self, text: str, chunk_size: int, chunk_overlap: int,
+        separators: Optional[List[str]] = None,
     ) -> List[str]:
         """
         按句子边界滑动窗口分段
+
+        Args:
+            separators: 句子边界分隔符列表，按优先级排序。None 时使用默认值
         """
         if not text:
             return []
+
+        seps = separators if separators else self.DEFAULT_SEPARATORS
 
         segments = []
         start = 0
@@ -525,7 +622,7 @@ class KnowledgeService:
 
             # 尝试在句子边界断开
             if end < text_len:
-                for sep in ["。", "\n", "！", "？", ".", "!", "?", "；", ";"]:
+                for sep in seps:
                     pos = text.rfind(sep, start, end)
                     if pos > start:
                         end = pos + 1
@@ -543,6 +640,32 @@ class KnowledgeService:
             start = next_start
 
         return segments
+
+    def _split_by_paragraph(
+        self, text: str, chunk_size: int, chunk_overlap: int,
+        separators: Optional[List[str]] = None,
+    ) -> List[str]:
+        """
+        按段落（双换行）切分，超长段落再用滑动窗口细分
+        """
+        if not text:
+            return []
+
+        # 按双换行切分段落
+        paragraphs = re.split(r"\n\s*\n", text)
+        paragraphs = [p.strip() for p in paragraphs if p.strip()]
+
+        chunks = []
+        for para in paragraphs:
+            if len(para) <= chunk_size:
+                # 段落长度在限制内，整体作为一个 chunk
+                chunks.append(para)
+            else:
+                # 超长段落用滑动窗口细分（段落内不重叠，避免语义碎片）
+                sub_chunks = self._sliding_window_split(para, chunk_size, 0, separators=separators)
+                chunks.extend(sub_chunks)
+
+        return chunks
 
     # ------------------------------------------------------------------
     # 检索
@@ -584,7 +707,8 @@ class KnowledgeService:
         score_threshold: float,
     ) -> List[Dict[str, Any]]:
         """纯向量检索（带关键词加权）"""
-        raw_results = vector_store_service.similarity_search(
+        raw_results = await asyncio.to_thread(
+            vector_store_service.similarity_search,
             kb_id=kb_id, query=query, k=top_k,
         )
         if not raw_results:
@@ -627,7 +751,8 @@ class KnowledgeService:
         score_threshold: float,
     ) -> List[Dict[str, Any]]:
         """BM25 全文检索"""
-        raw_results = vector_store_service.bm25_search(
+        raw_results = await asyncio.to_thread(
+            vector_store_service.bm25_search,
             kb_id=kb_id, query=query, k=top_k,
         )
         if not raw_results:
@@ -674,11 +799,9 @@ class KnowledgeService:
         fetch_k = top_k * 3  # 多取一些用于融合
 
         # 并行获取两种检索结果
-        vector_raw = vector_store_service.similarity_search(
-            kb_id=kb_id, query=query, k=fetch_k,
-        )
-        bm25_raw = vector_store_service.bm25_search(
-            kb_id=kb_id, query=query, k=fetch_k,
+        vector_raw, bm25_raw = await asyncio.gather(
+            asyncio.to_thread(vector_store_service.similarity_search, kb_id=kb_id, query=query, k=fetch_k),
+            asyncio.to_thread(vector_store_service.bm25_search, kb_id=kb_id, query=query, k=fetch_k),
         )
 
         # 构建 segment_id → 排名映射 + 真实向量距离

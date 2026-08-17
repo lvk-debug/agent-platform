@@ -69,6 +69,7 @@ class DocumentResponse(DocumentBase):
     error_message: Optional[str] = None
     source_type: str = "file"
     url: Optional[str] = None
+    chunk_strategy: Optional[str] = None
     created_at: datetime
     processed_at: Optional[datetime] = None
 
@@ -144,3 +145,55 @@ class CrawlResponse(BaseModel):
     message: str
     total_pages: int
     document_ids: List[int]
+
+
+# --- 文档分片预览 ---
+
+class ChunkPreviewRequest(BaseModel):
+    """
+    分片预览请求Schema
+    """
+    chunk_strategy: str = Field(
+        default="sliding_window",
+        pattern="^(sliding_window|paragraph)$",
+        description="分片策略: sliding_window 或 paragraph"
+    )
+    chunk_size: int = Field(default=500, ge=100, le=2000, description="分片大小")
+    chunk_overlap: int = Field(default=50, ge=0, le=500, description="分片重叠大小")
+    separators: Optional[List[str]] = Field(
+        default=None,
+        description="句子边界分隔符列表，按优先级排序。None 时使用默认值"
+    )
+
+
+class ChunkPreviewItem(BaseModel):
+    """
+    分片预览项Schema
+    """
+    content: str
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class ChunkPreviewResponse(BaseModel):
+    """
+    分片预览响应Schema
+    """
+    total_chunks: int
+    chunks: List[ChunkPreviewItem]
+
+
+class DocumentProcessRequest(BaseModel):
+    """
+    文档处理请求Schema
+    """
+    chunk_strategy: str = Field(
+        default="sliding_window",
+        pattern="^(sliding_window|paragraph)$",
+        description="分片策略: sliding_window 或 paragraph"
+    )
+    chunk_size: int = Field(default=500, ge=100, le=2000, description="分片大小")
+    chunk_overlap: int = Field(default=50, ge=0, le=500, description="分片重叠大小")
+    separators: Optional[List[str]] = Field(
+        default=None,
+        description="句子边界分隔符列表，按优先级排序。None 时使用默认值"
+    )

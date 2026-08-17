@@ -115,12 +115,29 @@ class ChatbotService:
         if request.inputs:
             query = self._replace_variables(query, request.inputs, config)
 
-        # 2. 知识库检索
+        # 2. 检索前增强：Query 扩展 → HyDE
+        search_query = query
+        if config.knowledge_bases:
+            # 2a. Query 扩展
+            if config.query_expansion_enabled:
+                expanded = await self._expand_query(query, config)
+                if expanded:
+                    search_query = expanded
+                    logger.info(f"查询扩展: '{query[:50]}' → '{search_query[:50]}'")
+
+            # 2b. HyDE 假设性文档
+            if config.hyde_enabled:
+                hyde_text = await self._generate_hyde(query, config)
+                if hyde_text:
+                    search_query = hyde_text
+                    logger.info(f"HyDE 生成: '{hyde_text[:80]}'")
+
+        # 3. 知识库检索
         context_text = ""
         citations: List[Dict[str, Any]] = []
         if config.knowledge_bases:
             context_text, citations = await self._retrieve_knowledge(
-                config.knowledge_bases, query
+                config.knowledge_bases, search_query
             )
 
         # 3. 获取或创建会话
@@ -203,6 +220,98 @@ class ChatbotService:
             if var.key in inputs:
                 text = text.replace("{{" + var.key + "}}", inputs[var.key])
         return text
+
+    # ------------------------------------------------------------------
+    # 检索增强：Query 扩展 & HyDE
+    # ------------------------------------------------------------------
+
+    DEFAULT_EXPANSION_PROMPT = """你是一个查询扩展助手。请将用户的问题扩展为更适合全文检索的形式。
+
+规则：
+1. 保留原始问题的核心语义
+2. 补充相关的同义词、近义词、神学术语
+3. 输出 1-3 个扩展后的检索查询，每行一个
+4. 不要输出解释，只输出查询
+
+用户问题：{query}"""
+
+    DEFAULT_HYDE_PROMPT = """你是一个假设性文档生成器。请根据用户的问题，生成一段假想的文档内容（200-400字），这段内容应该：
+1. 假设是知识库中真实存在的一篇文章
+2. 直接回答或解释用户的问题
+3. 使用陈述语气，不要用疑问句
+4. 包含具体的细节和信息
+
+用户问题：{query}
+
+假想文档："""
+
+    async def _call_llm_for_retrieval(self, prompt: str, config: ChatbotConfig) -> Optional[str]:
+        """调用 LLM 生成检索增强文本（复用配置的模型）"""
+        if not config.model_id:
+            return None
+
+        try:
+            from app.models.model import Model
+            model = self.db.query(Model).filter(Model.id == config.model_id).first()
+            if not model or not model.provider:
+                return None
+
+            provider_config = model.provider
+            llm_service = LLMService()
+            await llm_service.register_provider(
+                provider_type=provider_config.provider_type,
+                api_key=provider_config.api_key,
+                api_endpoint=provider_config.api_endpoint,
+            )
+
+            response = await llm_service.chat(
+                messages=[{"role": "user", "content": prompt}],
+                model=model.model_id,
+                provider=provider_config.provider_type,
+                temperature=0.3,
+                max_tokens=512,
+            )
+            return response.get("content", "").strip()
+        except Exception as e:
+            logger.warning(f"检索增强 LLM 调用失败: {e}")
+            return None
+
+    async def _expand_query(self, query: str, config: ChatbotConfig) -> Optional[str]:
+        """
+        Query 扩展：用 LLM 将用户问题扩展为多个相关表述
+
+        返回扩展后的查询文本（多行拼接），用于检索
+        """
+        prompt_template = config.query_expansion_prompt or self.DEFAULT_EXPANSION_PROMPT
+        prompt = prompt_template.replace("{query}", query)
+
+        result = await self._call_llm_for_retrieval(prompt, config)
+        if not result:
+            return None
+
+        # 取第一行作为主查询，其余作为补充
+        lines = [line.strip() for line in result.strip().split("\n") if line.strip()]
+        if not lines:
+            return None
+
+        # 用空格拼接多行查询，让检索引擎同时匹配多个表述
+        return " ".join(lines[:3])
+
+    async def _generate_hyde(self, query: str, config: ChatbotConfig) -> Optional[str]:
+        """
+        HyDE：生成假想文档用于检索
+
+        返回假想文档文本，用于向量检索
+        """
+        prompt_template = config.hyde_prompt or self.DEFAULT_HYDE_PROMPT
+        prompt = prompt_template.replace("{query}", query)
+
+        result = await self._call_llm_for_retrieval(prompt, config)
+        print(f"HyDE 生成结果: {result}")
+        if not result or len(result) < 20:
+            return None
+
+        return result
 
     async def _retrieve_knowledge(
         self,

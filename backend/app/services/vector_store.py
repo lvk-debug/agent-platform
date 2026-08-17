@@ -28,6 +28,7 @@ class ConfigurableSQLiteVec(SQLiteVec):
             return self._dimension
         return super().get_dimensionality()
 
+
 # 强制离线模式，使用本地缓存的 embedding 模型
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -61,7 +62,6 @@ class FastEmbedEmbeddings(Embeddings):
                 model_name=self._model_name,
                 cache_dir=Path(self._cache_dir),
                 local_files_only=True,
-                max_length=512,
             )
             logger.info("fastembed embedding 模型已加载")
         return self._embedder
@@ -133,15 +133,13 @@ class VectorStoreService:
         return f"kb_{kb_id}_fts"
 
     def _ensure_fts_table(self, kb_id: int) -> None:
-        """确保 FTS5 虚拟表已创建"""
+        """确保 FTS5 虚拟表已创建（unicode61 tokenizer 支持中文）"""
         store = self.get_store(kb_id)
         fts_table = self._get_fts_table_name(kb_id)
-        store._connection.execute(
-            f"""
+        store._connection.execute(f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS {fts_table}
-            USING fts5(content, metadata, segment_id UNINDEXED)
-            """
-        )
+            USING fts5(content, metadata, segment_id UNINDEXED, tokenize='unicode61 remove_diacritics 2')
+            """)
         store._connection.commit()
 
     def get_store(self, kb_id: int) -> SQLiteVec:
@@ -176,6 +174,9 @@ class VectorStoreService:
         """
         向知识库添加文本向量，同时同步写入 FTS5 索引
 
+        SQLiteVec.add_texts 内部已使用 embed_documents 批量 embed + executemany 批量插入，
+        此处额外用 executemany 批量写入 FTS5 索引，避免逐条 INSERT 开销。
+
         Args:
             kb_id: 知识库 ID
             texts: 文本列表
@@ -185,20 +186,28 @@ class VectorStoreService:
         Returns:
             添加的向量 ID 列表
         """
-        store = self.get_store(kb_id)
-        vector_ids = store.add_texts(texts=texts, metadatas=metadatas, ids=ids)
-
-        # 同步写入 FTS5 表
         import json
 
+        store = self.get_store(kb_id)
         fts_table = self._get_fts_table_name(kb_id)
+
+        if not texts:
+            return []
+
+        # 1) SQLiteVec 原生批量插入（内部 embed_documents + executemany）
+        vector_ids = store.add_texts(texts=texts, metadatas=metadatas, ids=ids)
+
+        # 2) executemany 批量写入 FTS5 索引
         if metadatas is None:
             metadatas = [{} for _ in texts]
-        for text, meta, vid in zip(texts, metadatas, vector_ids):
-            store._connection.execute(
-                f"INSERT INTO {fts_table}(content, metadata, segment_id) VALUES (?, ?, ?)",
-                (text, json.dumps(meta, ensure_ascii=False), meta.get("segment_id", "")),
-            )
+        fts_rows = [
+            (text, json.dumps(meta, ensure_ascii=False), meta.get("segment_id", ""))
+            for text, meta in zip(texts, metadatas)
+        ]
+        store._connection.executemany(
+            f"INSERT INTO {fts_table}(content, metadata, segment_id) VALUES (?, ?, ?)",
+            fts_rows,
+        )
         store._connection.commit()
 
         logger.info("已添加 %d 条向量到知识库 %d", len(vector_ids), kb_id)

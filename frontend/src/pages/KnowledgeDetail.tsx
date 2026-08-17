@@ -33,6 +33,7 @@ import {
   ClockCircleOutlined,
   DownOutlined,
   LinkOutlined,
+  SettingOutlined,
 } from '@ant-design/icons'
 import {
   knowledgeApi,
@@ -41,6 +42,7 @@ import {
 } from '../services/knowledge'
 import SegmentDrawer from '../components/SegmentDrawer'
 import SearchTestPanel from '../components/SearchTestPanel'
+import ChunkSettingDrawer from '../components/ChunkSettingDrawer'
 
 const { Title, Text } = Typography
 
@@ -60,6 +62,10 @@ const KnowledgeDetail: React.FC = () => {
   // 分段抽屉
   const [segmentDrawerVisible, setSegmentDrawerVisible] = useState(false)
   const [selectedDoc, setSelectedDoc] = useState<DocumentData | null>(null)
+
+  // 分片设置抽屉
+  const [chunkDrawerVisible, setChunkDrawerVisible] = useState(false)
+  const [chunkDoc, setChunkDoc] = useState<DocumentData | null>(null)
 
   // URL 爬取
   const [crawlModalVisible, setCrawlModalVisible] = useState(false)
@@ -109,7 +115,7 @@ const KnowledgeDetail: React.FC = () => {
     setUploading(true)
     try {
       await knowledgeApi.uploadDocument(kbId, file)
-      message.success('文档上传成功，正在后台处理...')
+      message.success('文档上传成功，正在后台解析为 Markdown...')
       // 重新加载文档列表
       setDocuments([])
       setNextCursor(null)
@@ -172,10 +178,16 @@ const KnowledgeDetail: React.FC = () => {
     setSegmentDrawerVisible(true)
   }
 
+  const handleOpenChunkSetting = (doc: DocumentData) => {
+    setChunkDoc(doc)
+    setChunkDrawerVisible(true)
+  }
+
   // 状态标签
   const getStatusTag = (status: string) => {
     const config: Record<string, { color: string; icon: React.ReactNode; text: string }> = {
-      pending: { color: 'default', icon: <ClockCircleOutlined />, text: '等待处理' },
+      pending: { color: 'default', icon: <ClockCircleOutlined />, text: '等待解析' },
+      parsed: { color: 'warning', icon: <FileTextOutlined />, text: '已解析' },
       processing: { color: 'processing', icon: <SyncOutlined spin />, text: '处理中' },
       completed: { color: 'success', icon: <CheckCircleOutlined />, text: '已完成' },
       failed: { color: 'error', icon: <CloseCircleOutlined />, text: '处理失败' },
@@ -263,17 +275,35 @@ const KnowledgeDetail: React.FC = () => {
     {
       title: '操作',
       key: 'action',
-      width: 200,
+      width: 250,
       render: (_: any, record: DocumentData) => (
         <Space>
-          {record.status === 'completed' && (
+          {record.status === 'parsed' && (
             <Button
               type="link"
-              icon={<EyeOutlined />}
-              onClick={() => handleViewSegments(record)}
+              icon={<SettingOutlined />}
+              onClick={() => handleOpenChunkSetting(record)}
             >
-              分段
+              设置分片
             </Button>
+          )}
+          {record.status === 'completed' && (
+            <>
+              <Button
+                type="link"
+                icon={<EyeOutlined />}
+                onClick={() => handleViewSegments(record)}
+              >
+                分段
+              </Button>
+              <Button
+                type="link"
+                icon={<SettingOutlined />}
+                onClick={() => handleOpenChunkSetting(record)}
+              >
+                重新分片
+              </Button>
+            </>
           )}
           {record.status === 'failed' && (
             <Button
@@ -356,6 +386,15 @@ const KnowledgeDetail: React.FC = () => {
         title="文档管理"
         extra={
           <Space>
+            <Button
+              icon={<ReloadOutlined />}
+              onClick={() => {
+                fetchDocuments(true)
+                fetchKB()
+              }}
+            >
+              刷新
+            </Button>
             <Button icon={<LinkOutlined />} onClick={() => setCrawlModalVisible(true)}>
               爬取URL
             </Button>
@@ -406,6 +445,23 @@ const KnowledgeDetail: React.FC = () => {
           kbId={kbId}
           docId={selectedDoc.id}
           docName={selectedDoc.name}
+        />
+      )}
+
+      {/* 分片设置抽屉 */}
+      {chunkDoc && (
+        <ChunkSettingDrawer
+          visible={chunkDrawerVisible}
+          onClose={() => {
+            setChunkDrawerVisible(false)
+            setChunkDoc(null)
+          }}
+          kbId={kbId}
+          document={chunkDoc}
+          onSuccess={() => {
+            fetchDocuments(true)
+            fetchKB()
+          }}
         />
       )}
 

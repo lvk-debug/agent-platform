@@ -72,6 +72,14 @@ class ChatbotConfig(BaseModel):
     memory_window: int = Field(50, ge=1, le=500)
     metadata_filter_enabled: bool = False
 
+    # HyDE 假设性文档嵌入
+    hyde_enabled: bool = Field(False, description="启用 HyDE，让 LLM 生成假想文档用于检索")
+    hyde_prompt: Optional[str] = Field(None, description="HyDE 生成提示词，None 时使用默认模板")
+
+    # Query 扩展
+    query_expansion_enabled: bool = Field(False, description="启用查询扩展，用 LLM 扩充用户问题")
+    query_expansion_prompt: Optional[str] = Field(None, description="查询扩展提示词，None 时使用默认模板")
+
 
 class ChatbotUpdate(BaseModel):
     """聊天助手更新请求"""

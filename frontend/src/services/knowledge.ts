@@ -36,11 +36,12 @@ export interface DocumentData {
   name: string
   file_type: string
   file_size?: number
-  status: 'pending' | 'processing' | 'completed' | 'failed'
+  status: 'pending' | 'parsed' | 'processing' | 'completed' | 'failed'
   chunk_count: number
   error_message?: string
   source_type: string
   url?: string
+  chunk_strategy?: 'sliding_window' | 'paragraph'
   created_at: string
   processed_at?: string
 }
@@ -79,6 +80,30 @@ export interface CrawlResponse {
   message: string
   total_pages: number
   document_ids: number[]
+}
+
+export interface ChunkPreviewRequest {
+  chunk_strategy: 'sliding_window' | 'paragraph'
+  chunk_size?: number
+  chunk_overlap?: number
+  separators?: string[]
+}
+
+export interface ChunkPreviewItem {
+  content: string
+  metadata?: Record<string, any>
+}
+
+export interface ChunkPreviewResponse {
+  total_chunks: number
+  chunks: ChunkPreviewItem[]
+}
+
+export interface DocumentProcessRequest {
+  chunk_strategy: 'sliding_window' | 'paragraph'
+  chunk_size?: number
+  chunk_overlap?: number
+  separators?: string[]
 }
 
 export const knowledgeApi = {
@@ -155,5 +180,20 @@ export const knowledgeApi = {
       max_depth: max_depth ?? 3,
       max_pages: max_pages ?? 50,
     })
+  },
+
+  // 获取文档内容
+  getDocumentContent: (kbId: number, docId: number) => {
+    return api.get<{ id: number; name: string; content: string; status: string }>(`/knowledge/${kbId}/documents/${docId}/content`)
+  },
+
+  // 预览文档分片
+  previewChunks: (kbId: number, docId: number, data: ChunkPreviewRequest) => {
+    return api.post<ChunkPreviewResponse>(`/knowledge/${kbId}/documents/${docId}/chunks/preview`, data)
+  },
+
+  // 处理文档（分片 + 向量化）
+  processDocument: (kbId: number, docId: number, data: DocumentProcessRequest) => {
+    return api.post(`/knowledge/${kbId}/documents/${docId}/process`, data)
   },
 }

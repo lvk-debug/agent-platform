@@ -69,11 +69,11 @@ class Document(Base):
     url = Column(String(2000), nullable=True)  # 爬取来源 URL
 
     # 文档处理状态
-    status = Column(
-        Enum("pending", "processing", "completed", "failed", name="doc_status_enum"),
-        default="pending"
-    )
+    status = Column(String(20), default="pending")
     error_message = Column(Text, nullable=True)
+
+    # 分片策略
+    chunk_strategy = Column(String(20), default="sliding_window", nullable=True)
 
     # 文档内容
     content = Column(Text, nullable=True)

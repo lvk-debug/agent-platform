@@ -19,6 +19,9 @@ from app.schemas.knowledge import (
     SearchRequest,
     SearchResponse,
     SearchResultItem,
+    ChunkPreviewRequest,
+    ChunkPreviewResponse,
+    DocumentProcessRequest,
 )
 from app.schemas.pagination import CursorResponse
 from app.services.knowledge import get_knowledge_service
@@ -41,15 +44,38 @@ FILE_TYPE_MAP = {
 }
 
 
-def _process_document_task(document_id: int):
-    """后台任务：处理文档（创建独立的 db session）"""
-    import asyncio
+async def _parse_document_task(document_id: int):
+    """后台任务：解析文档为 Markdown（创建独立的 db session）"""
     from app.core.database import SessionLocal
 
     db = SessionLocal()
     try:
         service = get_knowledge_service(db)
-        asyncio.run(service.process_document(document_id))
+        await service.parse_document(document_id)
+    finally:
+        db.close()
+
+
+async def _process_document_task(
+    document_id: int,
+    chunk_strategy: str = "sliding_window",
+    chunk_size: int = 500,
+    chunk_overlap: int = 50,
+    separators: Optional[List[str]] = None,
+):
+    """后台任务：处理文档分片和向量化（创建独立的 db session）"""
+    from app.core.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        service = get_knowledge_service(db)
+        await service.process_document(
+            document_id,
+            chunk_strategy=chunk_strategy,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=separators,
+        )
     finally:
         db.close()
 
@@ -243,8 +269,8 @@ async def upload_document(
     db.commit()
     db.refresh(document)
 
-    # 后台异步处理文档
-    background_tasks.add_task(_process_document_task, document.id)
+    # 后台异步解析文档为 Markdown
+    background_tasks.add_task(_parse_document_task, document.id)
 
     return document
 
@@ -364,7 +390,7 @@ async def retry_document(
     doc_id: int,
     background_tasks: BackgroundTasks,
 ) -> Any:
-    """重新处理失败的文档"""
+    """重新解析失败的文档"""
     # 验证知识库归属
     knowledge_base = (
         db.query(KnowledgeBase)
@@ -382,20 +408,150 @@ async def retry_document(
     if not document:
         raise HTTPException(status_code=404, detail="文档不存在")
 
-    if document.status not in ("failed", "completed"):
-        raise HTTPException(status_code=400, detail="只能重试失败或已完成的文档")
+    if document.status not in ("failed", "completed", "parsed"):
+        raise HTTPException(status_code=400, detail="只能重试失败、已完成或已解析的文档")
 
     # 清除旧的分段
     db.query(DocumentSegment).filter(DocumentSegment.document_id == doc_id).delete()
     document.status = "pending"
     document.error_message = None
     document.chunk_count = 0
+    document.content = None
     db.commit()
 
-    # 后台重新处理
-    background_tasks.add_task(_process_document_task, doc_id)
+    # 后台重新解析
+    background_tasks.add_task(_parse_document_task, doc_id)
 
-    return {"message": "文档已加入重新处理队列"}
+    return {"message": "文档已加入重新解析队列"}
+
+
+@router.get("/{kb_id}/documents/{doc_id}/content")
+def get_document_content(
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    kb_id: int,
+    doc_id: int,
+) -> Any:
+    """获取文档解析后的内容（Markdown）"""
+    # 验证知识库归属
+    knowledge_base = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == kb_id, KnowledgeBase.owner_id == current_user.id)
+        .first()
+    )
+    if not knowledge_base:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    document = (
+        db.query(Document)
+        .filter(Document.id == doc_id, Document.knowledge_base_id == kb_id)
+        .first()
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    return {
+        "id": document.id,
+        "name": document.name,
+        "content": document.content or "",
+        "status": document.status,
+    }
+
+
+@router.post("/{kb_id}/documents/{doc_id}/chunks/preview")
+def preview_document_chunks(
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    kb_id: int,
+    doc_id: int,
+    preview_in: ChunkPreviewRequest,
+) -> Any:
+    """预览文档分片效果"""
+    # 验证知识库归属
+    knowledge_base = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == kb_id, KnowledgeBase.owner_id == current_user.id)
+        .first()
+    )
+    if not knowledge_base:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    document = (
+        db.query(Document)
+        .filter(Document.id == doc_id, Document.knowledge_base_id == kb_id)
+        .first()
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    if document.status not in ("parsed", "completed", "failed"):
+        raise HTTPException(status_code=400, detail="文档未解析，请先上传或重试")
+
+    service = get_knowledge_service(db)
+    try:
+        chunks = service.preview_chunks(
+            document_id=doc_id,
+            chunk_strategy=preview_in.chunk_strategy,
+            chunk_size=preview_in.chunk_size,
+            chunk_overlap=preview_in.chunk_overlap,
+            separators=preview_in.separators,
+        )
+        return ChunkPreviewResponse(
+            total_chunks=len(chunks),
+            chunks=chunks,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{kb_id}/documents/{doc_id}/process")
+async def process_document_chunks(
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    kb_id: int,
+    doc_id: int,
+    process_in: DocumentProcessRequest,
+    background_tasks: BackgroundTasks,
+) -> Any:
+    """确认分片策略，开始处理文档（分片 + 向量化）"""
+    # 验证知识库归属
+    knowledge_base = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == kb_id, KnowledgeBase.owner_id == current_user.id)
+        .first()
+    )
+    if not knowledge_base:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    document = (
+        db.query(Document)
+        .filter(Document.id == doc_id, Document.knowledge_base_id == kb_id)
+        .first()
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    if document.status not in ("parsed", "failed", "completed"):
+        raise HTTPException(status_code=400, detail="文档状态不正确，需要先解析文档")
+
+    # 清除旧的分段（如果有的话）
+    db.query(DocumentSegment).filter(DocumentSegment.document_id == doc_id).delete()
+    db.commit()
+
+    # 后台处理文档
+    background_tasks.add_task(
+        _process_document_task,
+        doc_id,
+        process_in.chunk_strategy,
+        process_in.chunk_size,
+        process_in.chunk_overlap,
+        process_in.separators,
+    )
+
+    return {"message": "文档已加入处理队列"}
 
 
 @router.post("/{kb_id}/search", response_model=SearchResponse)
@@ -437,23 +593,18 @@ async def search_knowledge_base(
 # URL 爬取
 # ------------------------------------------------------------------
 
-def _crawl_and_process_task(kb_id: int, crawl_request: CrawlRequest):
+async def _crawl_and_process_task(kb_id: int, crawl_request: CrawlRequest):
     """后台任务：爬取 URL → 创建文档 → 处理分段（创建独立的 db session）"""
-    import asyncio
     from app.core.database import SessionLocal
     from app.services.crawler import WebCrawler
     from app.services.knowledge import KnowledgeService
 
-    async def _run():
-        crawler = WebCrawler()
-        result = await crawler.crawl(
-            start_url=crawl_request.url,
-            max_depth=crawl_request.max_depth,
-            max_pages=crawl_request.max_pages,
-        )
-        return result
-
-    crawl_result = asyncio.run(_run())
+    crawler = WebCrawler()
+    crawl_result = await crawler.crawl(
+        start_url=crawl_request.url,
+        max_depth=crawl_request.max_depth,
+        max_pages=crawl_request.max_pages,
+    )
 
     db = SessionLocal()
     try:
@@ -475,7 +626,8 @@ def _crawl_and_process_task(kb_id: int, crawl_request: CrawlRequest):
             db.flush()
 
             try:
-                service.process_document(document.id)
+                # 爬取的内容已经直接设置到 content 字段，直接处理分片
+                await service.process_document(document.id)
                 doc_ids.append(document.id)
             except Exception as e:
                 document.status = "failed"
