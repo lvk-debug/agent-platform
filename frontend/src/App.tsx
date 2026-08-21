@@ -15,6 +15,9 @@ import ChatbotOrchestration from './pages/ChatbotOrchestration'
 import ChatbotDebug from './pages/ChatbotDebug'
 import WorkflowOrchestration from './pages/WorkflowOrchestration'
 import PublishManagement from './pages/PublishManagement'
+import AgentOrchestration from './pages/AgentOrchestration'
+import AgentDebug from './pages/AgentDebug'
+import AppRunner from './pages/AppRunner'
 
 // 受保护的路由组件
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -49,7 +52,10 @@ const App: React.FC = () => {
         <Route path="apps/:appId/chatbot" element={<ChatbotOrchestration />} />
         <Route path="apps/:appId/chatbot/debug" element={<ChatbotDebug />} />
         <Route path="apps/:appId/workflow" element={<WorkflowOrchestration />} />
+        <Route path="apps/:appId/agent" element={<AgentOrchestration />} />
+        <Route path="apps/:appId/agent/debug" element={<AgentDebug />} />
         <Route path="apps/:appId/publish" element={<PublishManagement />} />
+        <Route path="apps/:appId/run" element={<AppRunner />} />
         <Route path="knowledge" element={<Knowledge />} />
         <Route path="knowledge/:id" element={<KnowledgeDetail />} />
         <Route path="models" element={<Models />} />

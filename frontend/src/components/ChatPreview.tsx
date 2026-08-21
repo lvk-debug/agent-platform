@@ -1,8 +1,9 @@
 /**
  * 聊天调试预览组件
- * 支持实时聊天测试，展示对话历史，显示知识库引用
+ * 支持实时聊天测试，展示对话历史，显示知识库引用，显示快捷导航链接
  */
 import React, { useState, useRef, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Input, Button, Avatar, Space, Typography, Spin, Empty, Tag, Collapse } from 'antd';
 import {
   SendOutlined,
@@ -10,6 +11,7 @@ import {
   RobotOutlined,
   ClearOutlined,
   FileTextOutlined,
+  LinkOutlined,
 } from '@ant-design/icons';
 import { chatbotApi, ChatRequest } from '../services/chatbot';
 
@@ -28,6 +30,12 @@ interface Citation {
   header_path?: string;
 }
 
+interface QuickLink {
+  title: string;
+  url: string;
+  description: string;
+}
+
 interface Message {
   id: string;
   role: 'user' | 'assistant';
@@ -35,6 +43,7 @@ interface Message {
   timestamp: Date;
   loading?: boolean;
   citations?: Citation[];
+  quick_links?: QuickLink[];
 }
 
 interface ChatPreviewProps {
@@ -51,6 +60,7 @@ interface ChatPreviewProps {
 }
 
 const ChatPreview: React.FC<ChatPreviewProps> = ({ appId, config, inputs }) => {
+  const navigate = useNavigate();
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [loading, setLoading] = useState(false);

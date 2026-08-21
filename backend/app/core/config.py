@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     QDRANT_URL: str = ""
     QDRANT_COLLECTION: str = "agent_platform"  # 统一 collection 名称
     RAG_SCORE_THRESHOLD: float = 0.5  # minimum cosine similarity to keep
-
+    
     # Redis配置 (可选)
     REDIS_URL: str = "redis://localhost:6379/0"
 
@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     OPENAI_API_BASE: str = "https://api.openai.com/v1"
     ANTHROPIC_API_KEY: str = ""
     LOCAL_LLM_BASE_URL: str = "http://localhost:11434"
+    TAVILY_API_KEY: str = ""
 
     # 外部知识库配置 (可选)
     EXTERNAL_KB_API_KEY: str = ""

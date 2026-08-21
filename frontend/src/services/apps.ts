@@ -64,4 +64,14 @@ export const appsApi = {
   publishApp: (id: number) => {
     return api.post<AppData>(`/apps/${id}/publish`)
   },
+
+  // 获取应用会话列表
+  getConversations: (appId: number, params?: { limit?: number; offset?: number }) => {
+    return api.get(`/apps/${appId}/conversations`, { params })
+  },
+
+  // 获取会话消息列表
+  getMessages: (appId: number, conversationId: number) => {
+    return api.get(`/apps/${appId}/conversations/${conversationId}/messages`)
+  },
 }
