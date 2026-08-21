@@ -126,8 +126,9 @@ print("=" * 60)
 print("4. 测试 VectorStoreService (完整流程)")
 print("=" * 60)
 
-from app.services.vector_store import vector_store_service
+from app.services.vector_store import get_vector_store_service
 
+vector_store_service = get_vector_store_service()
 KB_ID = 9999  # 测试用 ID
 try:
     # 写入

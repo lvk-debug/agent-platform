@@ -25,7 +25,7 @@ from app.schemas.knowledge import (
 )
 from app.schemas.pagination import CursorResponse
 from app.services.knowledge import get_knowledge_service
-from app.services.vector_store import vector_store_service
+from app.services.vector_store import get_vector_store_service
 from app.utils.deps import get_current_user
 from app.utils.pagination import apply_cursor_pagination
 
@@ -208,7 +208,7 @@ def delete_knowledge_base(
     db.delete(knowledge_base)
 
     # 清理向量数据
-    vector_store_service.delete_collection(kb_id)
+    get_vector_store_service().delete_collection(kb_id)
     db.commit()
     return {"message": "知识库已删除"}
 

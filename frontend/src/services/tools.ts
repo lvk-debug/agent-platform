@@ -36,6 +36,21 @@ export interface UpdateToolData {
   is_active?: boolean
 }
 
+export interface ToolTemplate {
+  id: string
+  name: string
+  description: string
+  category: string
+  icon: string
+  tool_type: string
+}
+
+export interface ToolCategory {
+  id: string
+  name: string
+  icon: string
+}
+
 export const toolsApi = {
   // 获取工具列表
   getTools: () => {
@@ -60,5 +75,27 @@ export const toolsApi = {
   // 删除工具
   deleteTool: (id: number) => {
     return api.delete(`/tools/${id}`)
+  },
+
+  // ============ 模板 / 安装 / MCP 导入 ============
+
+  // 获取工具模板列表
+  getTemplates: () => {
+    return api.get<ToolTemplate[]>('/tools/templates')
+  },
+
+  // 获取工具分类
+  getCategories: () => {
+    return api.get<ToolCategory[]>('/tools/templates/categories')
+  },
+
+  // 从模板安装工具
+  installFromTemplate: (templateId: string) => {
+    return api.post<ToolData>(`/tools/install/${templateId}`)
+  },
+
+  // 从 MCP Server 导入工具
+  importMcp: (url: string) => {
+    return api.post<ToolData[]>('/tools/import/mcp', { url })
   },
 }

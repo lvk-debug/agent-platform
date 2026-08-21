@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.models.knowledge import Document, DocumentSegment, KnowledgeBase
 from app.utils.logger import logger
 from app.core.config import settings
-from app.services.vector_store import vector_store_service
+from app.services.vector_store import get_vector_store_service
 
 
 class KnowledgeService:
@@ -19,6 +19,14 @@ class KnowledgeService:
 
     def __init__(self, db: Session):
         self.db = db
+        self._vector_store = None
+
+    @property
+    def vector_store(self):
+        """获取向量存储服务实例"""
+        if self._vector_store is None:
+            self._vector_store = get_vector_store_service()
+        return self._vector_store
 
     # ------------------------------------------------------------------
     # 文档处理流水线（三步）
@@ -165,7 +173,7 @@ class KnowledgeService:
                 for seg in segments
             ]
             await asyncio.to_thread(
-                vector_store_service.add_texts,
+                self.vector_store.add_texts,
                 kb_id=document.knowledge_base_id,
                 texts=texts,
                 metadatas=metadatas,
@@ -708,17 +716,23 @@ class KnowledgeService:
     ) -> List[Dict[str, Any]]:
         """纯向量检索（带关键词加权）"""
         raw_results = await asyncio.to_thread(
-            vector_store_service.similarity_search,
+            self.vector_store.similarity_search,
             kb_id=kb_id, query=query, k=top_k,
         )
         if not raw_results:
             return []
 
         query_lower = query.lower()
+        is_distance = getattr(self.vector_store, "score_is_distance", True)
         results = []
         for item in raw_results:
-            # SQLiteVec 返回余弦距离，越小越相似；转换为相似度分数
-            vector_score = max(0.0, 1.0 - item["score"])
+            raw_score = item["score"]
+            if is_distance:
+                # SQLiteVec 返回余弦距离，越小越相似；转换为相似度分数
+                vector_score = max(0.0, 1.0 - raw_score)
+            else:
+                # Qdrant 返回 RRF 融合分数，越大越好
+                vector_score = raw_score
 
             # 关键词加权：内容包含查询关键词时提升分数
             content_lower = item["content"].lower()
@@ -752,7 +766,7 @@ class KnowledgeService:
     ) -> List[Dict[str, Any]]:
         """BM25 全文检索"""
         raw_results = await asyncio.to_thread(
-            vector_store_service.bm25_search,
+            self.vector_store.bm25_search,
             kb_id=kb_id, query=query, k=top_k,
         )
         if not raw_results:
@@ -792,16 +806,47 @@ class KnowledgeService:
         """
         RRF (Reciprocal Rank Fusion) 混合检索
 
-        分别执行向量检索和 BM25 检索，用 RRF 公式融合排名：
-        score = Σ 1 / (k + rank_i)，k=60
+        Qdrant 后端：直接走内置 Prefetch + RRF 融合检索（dense + sparse BM25）。
+        SQLiteVec 后端：分别执行向量检索和 BM25 检索，用 Python RRF 公式融合排名。
         """
+        # Qdrant 后端已内置混合检索，直接用 similarity_search 的结果
+        is_distance = getattr(self.vector_store, "score_is_distance", True)
+        if not is_distance:
+            raw_results = await asyncio.to_thread(
+                self.vector_store.similarity_search,
+                kb_id=kb_id, query=query, k=top_k,
+            )
+            if not raw_results:
+                return []
+
+            results = []
+            for item in raw_results:
+                score = item["score"]
+                if score < score_threshold:
+                    continue
+                meta = item.get("metadata", {})
+                results.append({
+                    "segment_id": int(meta.get("segment_id", 0)),
+                    "document_id": int(meta.get("document_id", 0)),
+                    "document_name": "",
+                    "content": item["content"],
+                    "score": round(score, 4),
+                    "metadata": meta,
+                    "vector_score": round(score, 4),
+                    "bm25_score": round(score, 4),
+                })
+
+            self._enrich_results(results)
+            return results
+
+        # SQLiteVec 后端：Python RRF 融合
         RRF_K = 60
         fetch_k = top_k * 3  # 多取一些用于融合
 
         # 并行获取两种检索结果
         vector_raw, bm25_raw = await asyncio.gather(
-            asyncio.to_thread(vector_store_service.similarity_search, kb_id=kb_id, query=query, k=fetch_k),
-            asyncio.to_thread(vector_store_service.bm25_search, kb_id=kb_id, query=query, k=fetch_k),
+            asyncio.to_thread(self.vector_store.similarity_search, kb_id=kb_id, query=query, k=fetch_k),
+            asyncio.to_thread(self.vector_store.bm25_search, kb_id=kb_id, query=query, k=fetch_k),
         )
 
         # 构建 segment_id → 排名映射 + 真实向量距离
@@ -925,7 +970,7 @@ class KnowledgeService:
         kb_id = document.knowledge_base_id
 
         # 删除向量数据
-        vector_store_service.delete_by_metadata(
+        self.vector_store.delete_by_metadata(
             kb_id=kb_id,
             filter_key="document_id",
             filter_value=str(document_id),

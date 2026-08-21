@@ -80,3 +80,31 @@ body {
     @apply bg-page rounded-lg;
   }
 }
+
+/* 节点配置抽屉 tabs 样式 */
+.node-config-tabs .ant-tabs-nav {
+  margin-bottom: 0;
+}
+
+.node-config-tabs .ant-tabs-tab {
+  padding: 8px 0;
+  font-size: 14px;
+}
+
+.node-config-tabs .ant-tabs-content-holder {
+  padding: 0;
+}
+
+/* LLM 配置区域内的 Form.Item 紧凑间距 */
+.node-config-tabs .ant-form-item {
+  margin-bottom: 12px;
+}
+
+.node-config-tabs .ant-form-item:last-child {
+  margin-bottom: 0;
+}
+
+
+.react-flow__handle-right {
+  right: -3px;
+}

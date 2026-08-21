@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     VECTOR_STORE: str = "sqlite_vector"  # sqlite_vector 或 pgvector
     VECTOR_DB_DIR: str = "./data/vectors"  # SQLiteVec 向量数据库目录
 
+    # Qdrant配置
+    QDRANT_URL: str = ""
+    QDRANT_COLLECTION: str = "agent_platform"  # 统一 collection 名称
+    RAG_SCORE_THRESHOLD: float = 0.5  # minimum cosine similarity to keep
+
     # Redis配置 (可选)
     REDIS_URL: str = "redis://localhost:6379/0"
 
@@ -60,6 +65,7 @@ class Settings(BaseSettings):
     # 向量数据库配置
     VECTOR_DB_NAME: str = "agent_platform"
     EMBEDDING_MODEL: str = ""
+    EMBEDDING_SPARSE_MODEL: str = "Qdrant/bm25"  # fastembed 稀疏模型，用于 Qdrant 混合检索
     EMBEDDING_MODEL_PATH: str = ""
     EMBEDDING_DIMENSION: int = 0  # 0 表示自动检测
 

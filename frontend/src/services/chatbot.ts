@@ -4,14 +4,20 @@
 import api from './api';
 
 // 类型定义
+export type VariableType = 'text_input' | 'paragraph' | 'select' | 'number' | 'checkbox' | 'api_variable';
+
 export interface ChatbotVariable {
   key: string;
   name: string;
-  type: 'text_input' | 'paragraph' | 'select';
+  type: VariableType;
   required: boolean;
   default?: string;
   options?: Array<{ value: string; label: string }>;
   description?: string;
+  // API 变量专用配置
+  api_url?: string;
+  api_method?: 'GET' | 'POST';
+  api_headers?: Record<string, string>;
 }
 
 export interface KnowledgeBaseConfig {

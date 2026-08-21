@@ -6,6 +6,7 @@ from app.models.knowledge import KnowledgeBase, Document, DocumentSegment
 from app.models.model import ModelProvider, Model
 from app.models.tool import Tool, AppTool
 from app.models.workflow import Workflow, WorkflowRun
+from app.models.publish_config import PublishConfig
 
 __all__ = [
     "User",
@@ -22,4 +23,5 @@ __all__ = [
     "AppTool",
     "Workflow",
     "WorkflowRun",
+    "PublishConfig",
 ]

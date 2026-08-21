@@ -14,7 +14,10 @@ import {
   Typography,
   Row,
   Col,
+  Tabs,
+  Spin,
   Empty,
+  Badge,
 } from 'antd'
 import {
   PlusOutlined,
@@ -22,10 +25,20 @@ import {
   DeleteOutlined,
   ToolOutlined,
   SearchOutlined,
+  AppstoreOutlined,
+  CloudDownloadOutlined,
+  CheckOutlined,
+  LinkOutlined,
 } from '@ant-design/icons'
-import { toolsApi, ToolData, CreateToolData } from '../services/tools'
+import {
+  toolsApi,
+  ToolData,
+  CreateToolData,
+  ToolTemplate,
+  ToolCategory,
+} from '../services/tools'
 
-const { Title, Text } = Typography
+const { Title, Text, Paragraph } = Typography
 const { Option } = Select
 const { TextArea } = Input
 
@@ -34,10 +47,24 @@ const Tools: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [createModalVisible, setCreateModalVisible] = useState(false)
   const [editModalVisible, setEditModalVisible] = useState(false)
+  const [exploreModalVisible, setExploreModalVisible] = useState(false)
   const [createForm] = Form.useForm()
   const [editForm] = Form.useForm()
   const [selectedTool, setSelectedTool] = useState<ToolData | null>(null)
   const [searchText, setSearchText] = useState('')
+
+  // 探索工具相关状态
+  const [templates, setTemplates] = useState<ToolTemplate[]>([])
+  const [categories, setCategories] = useState<ToolCategory[]>([])
+  const [templatesLoading, setTemplatesLoading] = useState(false)
+  const [selectedCategory, setSelectedCategory] = useState('all')
+  const [templateSearch, setTemplateSearch] = useState('')
+  const [installingId, setInstallingId] = useState<string | null>(null)
+
+  // MCP 导入相关状态
+  const [mcpImportVisible, setMcpImportVisible] = useState(false)
+  const [mcpUrl, setMcpUrl] = useState('')
+  const [mcpImporting, setMcpImporting] = useState(false)
 
   useEffect(() => {
     fetchTools()
@@ -55,9 +82,72 @@ const Tools: React.FC = () => {
     }
   }
 
+  // 加载探索工具数据
+  const loadExploreData = async () => {
+    setTemplatesLoading(true)
+    try {
+      const [templatesRes, categoriesRes] = await Promise.all([
+        toolsApi.getTemplates(),
+        toolsApi.getCategories(),
+      ])
+      setTemplates(templatesRes.data)
+      setCategories(categoriesRes.data)
+    } catch (error) {
+      message.error('加载工具模板失败')
+    } finally {
+      setTemplatesLoading(false)
+    }
+  }
+
+  // 打开探索工具弹窗
+  const handleOpenExplore = () => {
+    setExploreModalVisible(true)
+    loadExploreData()
+  }
+
+  // 从模板安装工具
+  const handleInstall = async (templateId: string) => {
+    setInstallingId(templateId)
+    try {
+      await toolsApi.installFromTemplate(templateId)
+      message.success('工具安装成功')
+      fetchTools()
+    } catch (error: any) {
+      const detail = error?.response?.data?.detail || '安装失败'
+      message.error(detail)
+    } finally {
+      setInstallingId(null)
+    }
+  }
+
+  // MCP 导入
+  const handleMcpImport = async () => {
+    if (!mcpUrl.trim()) {
+      message.warning('请输入 MCP Server URL')
+      return
+    }
+    setMcpImporting(true)
+    try {
+      const response = await toolsApi.importMcp(mcpUrl)
+      const count = response.data.length
+      if (count > 0) {
+        message.success(`成功导入 ${count} 个工具`)
+        setMcpImportVisible(false)
+        setMcpUrl('')
+        fetchTools()
+      } else {
+        message.warning('未发现可用工具')
+      }
+    } catch (error: any) {
+      const detail = error?.response?.data?.detail || '导入失败'
+      message.error(detail)
+    } finally {
+      setMcpImporting(false)
+    }
+  }
+
   const handleCreate = async (values: CreateToolData) => {
     try {
-      // 处理JSON字段
       const data = {
         ...values,
         parameters_schema: values.parameters_schema
@@ -82,9 +172,7 @@ const Tools: React.FC = () => {
 
   const handleUpdate = async (values: any) => {
     if (!selectedTool) return
-
     try {
-      // 处理JSON字段
       const data = {
         ...values,
         parameters_schema: values.parameters_schema
@@ -135,7 +223,6 @@ const Tools: React.FC = () => {
     setEditModalVisible(true)
   }
 
-  // 工具类型中文名
   const getToolTypeName = (type: string) => {
     const names: Record<string, string> = {
       builtin: '内置工具',
@@ -145,7 +232,6 @@ const Tools: React.FC = () => {
     return names[type] || type
   }
 
-  // 工具类型颜色
   const getToolTypeColor = (type: string) => {
     const colors: Record<string, string> = {
       builtin: 'blue',
@@ -155,14 +241,27 @@ const Tools: React.FC = () => {
     return colors[type] || 'default'
   }
 
-  // 过滤工具
+  // 检查模板是否已安装
+  const isInstalled = (templateName: string) => {
+    return tools.some((t) => t.name === templateName)
+  }
+
+  // 过滤模板
+  const filteredTemplates = templates.filter((t) => {
+    const matchCategory = selectedCategory === 'all' || t.category === selectedCategory
+    const matchSearch =
+      !templateSearch ||
+      t.name.toLowerCase().includes(templateSearch.toLowerCase()) ||
+      t.description.toLowerCase().includes(templateSearch.toLowerCase())
+    return matchCategory && matchSearch
+  })
+
   const filteredTools = tools.filter(
     (tool) =>
       tool.name.toLowerCase().includes(searchText.toLowerCase()) ||
       tool.description?.toLowerCase().includes(searchText.toLowerCase())
   )
 
-  // 表格列定义
   const columns = [
     {
       title: '工具名称',
@@ -235,7 +334,6 @@ const Tools: React.FC = () => {
     },
   ]
 
-  // 工具表单组件
   const ToolForm: React.FC<{ form: any; onFinish: (values: any) => void }> = ({
     form,
     onFinish,
@@ -316,13 +414,21 @@ const Tools: React.FC = () => {
         <Title level={4} className="m-0">
           工具管理
         </Title>
-        <Button
-          type="primary"
-          icon={<PlusOutlined />}
-          onClick={() => setCreateModalVisible(true)}
-        >
-          添加工具
-        </Button>
+        <Space>
+          <Button
+            icon={<AppstoreOutlined />}
+            onClick={handleOpenExplore}
+          >
+            探索工具
+          </Button>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={() => setCreateModalVisible(true)}
+          >
+            添加工具
+          </Button>
+        </Space>
       </div>
 
       {/* 搜索栏 */}
@@ -346,6 +452,161 @@ const Tools: React.FC = () => {
           pagination={false}
         />
       </Card>
+
+      {/* ============ 探索工具弹窗 ============ */}
+      <Modal
+        title={
+          <Space>
+            <AppstoreOutlined />
+            <span>探索工具</span>
+          </Space>
+        }
+        open={exploreModalVisible}
+        onCancel={() => setExploreModalVisible(false)}
+        footer={null}
+        width={900}
+      >
+        {/* 搜索和分类 */}
+        <Row gutter={16} style={{ marginBottom: 16 }}>
+          <Col span={16}>
+            <Input
+              placeholder="搜索工具..."
+              prefix={<SearchOutlined />}
+              value={templateSearch}
+              onChange={(e) => setTemplateSearch(e.target.value)}
+              allowClear
+            />
+          </Col>
+          <Col span={8}>
+            <Select
+              value={selectedCategory}
+              onChange={setSelectedCategory}
+              style={{ width: '100%' }}
+            >
+              {categories.map((cat) => (
+                <Option key={cat.id} value={cat.id}>
+                  {cat.icon} {cat.name}
+                </Option>
+              ))}
+            </Select>
+          </Col>
+        </Row>
+
+        {/* MCP 导入入口 */}
+        <Card
+          size="small"
+          style={{ marginBottom: 16, background: '#f6f8ff', borderColor: '#d6e4ff' }}
+          onClick={() => setMcpImportVisible(true)}
+        >
+          <Space>
+            <CloudDownloadOutlined style={{ fontSize: 20, color: '#1677ff' }} />
+            <div>
+              <Text strong>导入 MCP 工具</Text>
+              <div>
+                <Text type="secondary">从 MCP Server URL 自动导入工具</Text>
+              </div>
+            </div>
+          </Space>
+        </Card>
+
+        {/* 工具模板列表 */}
+        {templatesLoading ? (
+          <div style={{ textAlign: 'center', padding: '40px 0' }}>
+            <Spin size="large" />
+          </div>
+        ) : filteredTemplates.length === 0 ? (
+          <Empty description="暂无匹配的工具" />
+        ) : (
+          <Row gutter={[16, 16]}>
+            {filteredTemplates.map((template) => {
+              const installed = isInstalled(template.name)
+              return (
+                <Col span={8} key={template.id}>
+                  <Card
+                    size="small"
+                    hoverable
+                    style={{ height: '100%' }}
+                    actions={[
+                      installed ? (
+                        <span style={{ color: '#52c41a' }}>
+                          <CheckOutlined /> 已安装
+                        </span>
+                      ) : (
+                        <Button
+                          type="link"
+                          loading={installingId === template.id}
+                          onClick={() => handleInstall(template.id)}
+                        >
+                          安装
+                        </Button>
+                      ),
+                    ]}
+                  >
+                    <Card.Meta
+                      avatar={
+                        <span style={{ fontSize: 28 }}>{template.icon}</span>
+                      }
+                      title={
+                        <Space>
+                          <Text strong>{template.name}</Text>
+                          <Tag color={getToolTypeColor(template.tool_type)}>
+                            {getToolTypeName(template.tool_type)}
+                          </Tag>
+                        </Space>
+                      }
+                      description={
+                        <Paragraph
+                          type="secondary"
+                          ellipsis={{ rows: 2 }}
+                          style={{ marginBottom: 0, fontSize: 12 }}
+                        >
+                          {template.description}
+                        </Paragraph>
+                      }
+                    />
+                  </Card>
+                </Col>
+              )
+            })}
+          </Row>
+        )}
+      </Modal>
+
+      {/* ============ MCP 导入弹窗 ============ */}
+      <Modal
+        title={
+          <Space>
+            <LinkOutlined />
+            <span>导入 MCP 工具</span>
+          </Space>
+        }
+        open={mcpImportVisible}
+        onCancel={() => {
+          setMcpImportVisible(false)
+          setMcpUrl('')
+        }}
+        onOk={handleMcpImport}
+        confirmLoading={mcpImporting}
+        okText="导入"
+        cancelText="取消"
+      >
+        <div style={{ marginBottom: 16 }}>
+          <Text type="secondary">
+            输入 MCP Server 的 URL，系统将自动解析并导入可用工具。
+          </Text>
+        </div>
+        <Input
+          placeholder="https://mcp.so/server/xxx 或 http://localhost:3000/mcp"
+          value={mcpUrl}
+          onChange={(e) => setMcpUrl(e.target.value)}
+          size="large"
+        />
+        <div style={{ marginTop: 8 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            支持标准 MCP HTTP 协议和 mcp.so 链接
+          </Text>
+        </div>
+      </Modal>
 
       {/* 创建工具弹窗 */}
       <Modal

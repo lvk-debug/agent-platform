@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { Card, Button, message, Spin, Row, Col, Space, Breadcrumb, Switch, Input, Collapse, Typography } from 'antd'
-import { SaveOutlined, SettingOutlined, CommentOutlined, SearchOutlined } from '@ant-design/icons'
+import { SaveOutlined, SettingOutlined, CommentOutlined } from '@ant-design/icons'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import PromptEditor from '../components/PromptEditor'
 import VariableSettings from '../components/VariableSettings'
@@ -171,7 +171,7 @@ const ChatbotOrchestration: React.FC = () => {
           />
         </Card>
 
-        <Card title="变量设置" className="mb-4">
+        <Card className="mb-4">
           <VariableSettings
             variables={config.variables}
             onChange={(variables) => setConfig({ ...config, variables })}

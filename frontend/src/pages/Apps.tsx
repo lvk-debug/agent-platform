@@ -23,6 +23,7 @@ import {
   DeleteOutlined,
   PlayCircleOutlined,
   DownOutlined,
+  ShareAltOutlined,
 } from '@ant-design/icons'
 import { appsApi, AppData, CreateAppData } from '../services/apps'
 
@@ -216,6 +217,8 @@ const Apps: React.FC = () => {
             onClick={() => {
               if (record.app_type === 'chatbot') {
                 navigate(`/apps/${record.id}/chatbot`)
+              } else if (record.app_type === 'workflow') {
+                navigate(`/apps/${record.id}/workflow`)
               } else {
                 navigate(`/apps/${record.id}`)
               }
@@ -223,6 +226,15 @@ const Apps: React.FC = () => {
           >
             编辑
           </Button>
+          {record.status === 'published' && (
+            <Button
+              type="link"
+              icon={<ShareAltOutlined />}
+              onClick={() => navigate(`/apps/${record.id}/publish`)}
+            >
+              发布管理
+            </Button>
+          )}
           {record.status === 'draft' && (
             <Button
               type="link"

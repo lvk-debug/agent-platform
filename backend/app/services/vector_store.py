@@ -1,32 +1,74 @@
 """
-向量存储服务 — 基于 LangChain SQLiteVec + sqlite-vec
+向量存储服务 — 支持 SQLiteVec 和 Qdrant 两种后端
 
 将 fastembed 封装为 LangChain Embeddings 接口，
-使用 SQLiteVec 管理向量的存储和相似度检索。
+提供统一的向量存储和检索接口。
 """
 
 import os
 import sqlite3
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import sqlite_vec
 from langchain_core.embeddings import Embeddings
-from langchain_community.vectorstores import SQLiteVec
 
 from app.core.config import settings
 from app.utils.logger import logger
 
 
-class ConfigurableSQLiteVec(SQLiteVec):
-    """支持显式指定维度的 SQLiteVec 子类，避免每次创建表时做 dummy embedding"""
+class VectorStoreBase(ABC):
+    """向量存储抽象基类"""
 
-    _dimension: int = 0
+    # True = score 是距离（越小越相似，如余弦距离）
+    # False = score 是相似度/融合分数（越大越好，如 RRF）
+    score_is_distance: bool = True
 
-    def get_dimensionality(self) -> int:
-        if self._dimension > 0:
-            return self._dimension
-        return super().get_dimensionality()
+    @abstractmethod
+    def add_texts(
+        self,
+        kb_id: int,
+        texts: List[str],
+        metadatas: Optional[List[Dict[str, Any]]] = None,
+        ids: Optional[List[str]] = None,
+    ) -> List[str]:
+        """添加文本向量"""
+        pass
+
+    @abstractmethod
+    def similarity_search(
+        self,
+        kb_id: int,
+        query: str,
+        k: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """向量相似度检索"""
+        pass
+
+    @abstractmethod
+    def bm25_search(
+        self,
+        kb_id: int,
+        query: str,
+        k: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """BM25 全文检索"""
+        pass
+
+    @abstractmethod
+    def delete_by_metadata(
+        self,
+        kb_id: int,
+        filter_key: str,
+        filter_value: str,
+    ) -> int:
+        """按元数据条件删除向量"""
+        pass
+
+    @abstractmethod
+    def delete_collection(self, kb_id: int) -> bool:
+        """删除整个知识库的向量数据"""
+        pass
 
 
 # 强制离线模式，使用本地缓存的 embedding 模型
@@ -101,7 +143,29 @@ class FastEmbedEmbeddings(Embeddings):
         return self._embed_batch([self._truncate(text)])[0]
 
 
-class VectorStoreService:
+# ============ SQLiteVec 后端 ============
+
+try:
+    import sqlite_vec
+    from langchain_community.vectorstores import SQLiteVec
+
+    class ConfigurableSQLiteVec(SQLiteVec):
+        """支持显式指定维度的 SQLiteVec 子类，避免每次创建表时做 dummy embedding"""
+
+        _dimension: int = 0
+
+        def get_dimensionality(self) -> int:
+            if self._dimension > 0:
+                return self._dimension
+            return super().get_dimensionality()
+
+    SQLITE_VEC_AVAILABLE = True
+except ImportError:
+    SQLITE_VEC_AVAILABLE = False
+    logger.warning("sqlite-vec 未安装，SQLiteVec 后端不可用")
+
+
+class SQLiteVecStoreService(VectorStoreBase):
     """
     向量存储服务 — 管理 SQLiteVec 实例，提供统一的向量操作接口
 
@@ -397,5 +461,541 @@ class VectorStoreService:
         return True
 
 
-# 全局单例
-vector_store_service = VectorStoreService()
+# ============ Qdrant 后端 ============
+
+
+class QdrantStoreService(VectorStoreBase):
+    """
+    Qdrant 向量存储服务 — Dense + Sparse BM25 混合检索
+
+    每个知识库使用独立的 collection（kb_{id}），同时存储 dense 和 sparse 向量。
+    检索时使用 Qdrant Prefetch API 做 dense + sparse 混合检索，内部 RRF 融合排名。
+    """
+
+    score_is_distance = False  # RRF 融合分数，越大越好
+
+    def __init__(self):
+        self._client = None
+        self._embeddings: Optional[FastEmbedEmbeddings] = None
+        self._sparse_embedder = None
+        self._collections_cache: set = set()
+
+    @property
+    def embeddings(self) -> FastEmbedEmbeddings:
+        if self._embeddings is None:
+            self._embeddings = FastEmbedEmbeddings()
+        return self._embeddings
+
+    @property
+    def sparse_embedder(self):
+        """懒加载 fastembed 稀疏模型（BM25）"""
+        if self._sparse_embedder is None:
+            from fastembed import SparseTextEmbedding
+
+            model_name = settings.EMBEDDING_SPARSE_MODEL or "Qdrant/bm25"
+            cache_dir = settings.EMBEDDING_MODEL_PATH or None
+            kwargs = {"model_name": model_name}
+            if cache_dir and Path(cache_dir).exists():
+                kwargs["cache_dir"] = Path(cache_dir)
+            self._sparse_embedder = SparseTextEmbedding(**kwargs)
+            logger.info("fastembed 稀疏模型已加载: %s", model_name)
+        return self._sparse_embedder
+
+    @property
+    def client(self):
+        """懒加载 Qdrant 客户端"""
+        if self._client is None:
+            from qdrant_client import QdrantClient
+
+            url = settings.QDRANT_URL
+            if not url:
+                raise ValueError("QDRANT_URL 未配置")
+
+            self._client = QdrantClient(url=url, timeout=30)
+            logger.info("Qdrant 客户端已连接: %s", url)
+        return self._client
+
+    def _get_collection_name(self, kb_id: int) -> str:
+        """获取 collection 名称（统一使用同一个 collection，按 kb_id payload 隔离）"""
+        return settings.QDRANT_COLLECTION or "agent_platform"
+
+    def _kb_filter(self, kb_id: int):
+        """构建 kb_id payload 过滤条件（kb_id 在 payload 中存储为字符串）"""
+        from qdrant_client.http import models as rest
+
+        return rest.Filter(
+            must=[
+                rest.FieldCondition(
+                    key="kb_id",
+                    match=rest.MatchValue(value=str(kb_id)),
+                )
+            ]
+        )
+
+    def _has_named_vectors(self, collection_name: str) -> bool:
+        """检查 collection 是否已配置 named vectors（dense + bm25）"""
+        try:
+            info = self.client.get_collection(collection_name)
+            config = info.config
+            # 检查是否存在名为 dense 的向量和名为 bm25 的稀疏向量
+            has_dense = (
+                config.params.vectors is not None
+                and isinstance(config.params.vectors, dict)
+                and "dense" in config.params.vectors
+            )
+            has_bm25 = (
+                config.params.sparse_vectors is not None
+                and "bm25" in config.params.sparse_vectors
+            )
+            return has_dense and has_bm25
+        except Exception:
+            return False
+
+    def _ensure_collection(self, kb_id: int) -> str:
+        """确保 collection 存在，同时配置 dense + sparse 向量"""
+        from qdrant_client.http import models as rest
+
+        collection_name = self._get_collection_name(kb_id)
+
+        if collection_name not in self._collections_cache:
+            try:
+                collections = self.client.get_collections().collections
+                existing = {c.name for c in collections}
+
+                need_create = collection_name not in existing
+                need_recreate = False
+
+                if not need_create:
+                    # collection 已存在，检查向量配置是否匹配
+                    if not self._has_named_vectors(collection_name):
+                        logger.warning(
+                            "Qdrant collection %s 向量配置不匹配（缺少 dense/bm25 named vectors），将重建",
+                            collection_name,
+                        )
+                        self.client.delete_collection(collection_name)
+                        need_recreate = True
+
+                if need_create or need_recreate:
+                    dimension = settings.EMBEDDING_DIMENSION or 512
+                    self.client.create_collection(
+                        collection_name=collection_name,
+                        vectors_config={
+                            "dense": rest.VectorParams(
+                                size=dimension,
+                                distance=rest.Distance.COSINE,
+                            ),
+                        },
+                        sparse_vectors_config={
+                            "bm25": rest.SparseVectorParams(
+                                index=rest.SparseIndexParams(),
+                            ),
+                        },
+                    )
+                    logger.info(
+                        "Qdrant collection 已创建: %s (dense=%d, sparse=bm25)",
+                        collection_name,
+                        dimension,
+                    )
+
+                self._collections_cache.add(collection_name)
+            except Exception as e:
+                logger.error("Qdrant collection 检查失败: %s", e)
+                raise
+
+        return collection_name
+
+    def _embed_sparse(self, texts: List[str]):
+        """批量生成稀疏向量"""
+        results = list(self.sparse_embedder.embed(texts))
+        sparse_vectors = []
+        for embedding in results:
+            from qdrant_client.http import models as rest
+
+            sparse_vectors.append(
+                rest.SparseVector(
+                    indices=embedding.indices.tolist(),
+                    values=embedding.values.tolist(),
+                )
+            )
+        return sparse_vectors
+
+    def add_texts(
+        self,
+        kb_id: int,
+        texts: List[str],
+        metadatas: Optional[List[Dict[str, Any]]] = None,
+        ids: Optional[List[str]] = None,
+    ) -> List[str]:
+        """
+        向知识库添加文本向量（同时写入 dense 和 sparse 向量）
+
+        Args:
+            kb_id: 知识库 ID
+            texts: 文本列表
+            metadatas: 元数据列表
+            ids: 自定义 ID 列表
+
+        Returns:
+            添加的向量 ID 列表
+        """
+        from qdrant_client.http import models as rest
+        from uuid import uuid4
+
+        collection_name = self._ensure_collection(kb_id)
+
+        if not texts:
+            return []
+
+        # 生成 dense + sparse embedding
+        dense_embeddings = self.embeddings.embed_documents(texts)
+        sparse_embeddings = self._embed_sparse(texts)
+
+        # 生成 ID
+        if ids is None:
+            ids = [str(uuid4()) for _ in texts]
+
+        if metadatas is None:
+            metadatas = [{} for _ in texts]
+
+        # 构建 Qdrant points（named vectors: dense + bm25）
+        points = []
+        for i, (text, dense_emb, sparse_emb, metadata) in enumerate(
+            zip(texts, dense_embeddings, sparse_embeddings, metadatas)
+        ):
+            payload = {
+                "content": text,
+                "kb_id": kb_id,
+                **metadata,
+            }
+            points.append(
+                rest.PointStruct(
+                    id=ids[i],
+                    vector={
+                        "dense": dense_emb,
+                        "bm25": sparse_emb,
+                    },
+                    payload=payload,
+                )
+            )
+
+        # 批量上传
+        batch_size = 100
+        for i in range(0, len(points), batch_size):
+            batch = points[i : i + batch_size]
+            self.client.upsert(
+                collection_name=collection_name,
+                points=batch,
+            )
+
+        logger.info(
+            "已添加 %d 条向量到 Qdrant collection %s (dense + sparse)",
+            len(ids),
+            collection_name,
+        )
+        return ids
+
+    def similarity_search(
+        self,
+        kb_id: int,
+        query: str,
+        k: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """
+        Dense + Sparse BM25 混合检索（Qdrant Prefetch + RRF 融合）
+
+        使用 Qdrant 原生 Query API：
+        - Prefetch 同时查询 dense 和 sparse 向量
+        - fusion=RRECIPROCAL_RRF 做排名融合
+        - 最终取 top-k 结果
+
+        Args:
+            kb_id: 知识库 ID
+            query: 查询文本
+            k: 返回结果数量
+
+        Returns:
+            检索结果列表，每项包含 content, metadata, score
+        """
+        from qdrant_client.http import models as rest
+
+        collection_name = self._ensure_collection(kb_id)
+
+        # 生成查询向量（dense + sparse）
+        query_dense = self.embeddings.embed_query(query)
+        query_sparse_list = list(self.sparse_embedder.embed([query]))
+        query_sparse = rest.SparseVector(
+            indices=query_sparse_list[0].indices.tolist(),
+            values=query_sparse_list[0].values.tolist(),
+        )
+
+        try:
+            # kb_id 过滤（共享 collection 时隔离不同知识库）
+            kb_filter = self._kb_filter(kb_id)
+
+            # Qdrant Query API: Prefetch + Fusion
+            results = self.client.query_points(
+                collection_name=collection_name,
+                prefetch=[
+                    rest.Prefetch(
+                        query=query_dense,
+                        using="dense",
+                        limit=k * 3,
+                        filter=kb_filter,
+                    ),
+                    rest.Prefetch(
+                        query=query_sparse,
+                        using="bm25",
+                        limit=k * 3,
+                        filter=kb_filter,
+                    ),
+                ],
+                query=rest.FusionQuery(fusion=rest.Fusion.RRF),
+                query_filter=kb_filter,
+                limit=k,
+                with_payload=True,
+            )
+
+            items = []
+            for hit in results.points:
+                payload = hit.payload or {}
+                items.append(
+                    {
+                        "content": payload.get("content", ""),
+                        "metadata": {
+                            k: v
+                            for k, v in payload.items()
+                            if k not in ("content", "kb_id")
+                        },
+                        "score": float(hit.score) if hit.score else 0.0,
+                    }
+                )
+
+            return items
+        except Exception as e:
+            logger.error("Qdrant 混合检索失败 kb_id=%d: %s", kb_id, e)
+            # 回退到纯 dense 检索
+            try:
+                kb_filter = self._kb_filter(kb_id)
+                results = self.client.query_points(
+                    collection_name=collection_name,
+                    query=query_dense,
+                    using="dense",
+                    query_filter=kb_filter,
+                    limit=k,
+                    with_payload=True,
+                )
+                return [
+                    {
+                        "content": hit.payload.get("content", ""),
+                        "metadata": {
+                            k: v
+                            for k, v in (hit.payload or {}).items()
+                            if k not in ("content", "kb_id")
+                        },
+                        "score": float(hit.score) if hit.score else 0.0,
+                    }
+                    for hit in results.points
+                ]
+            except Exception as e2:
+                logger.error("Qdrant 回退检索也失败 kb_id=%d: %s", kb_id, e2)
+                return []
+
+    def bm25_search(
+        self,
+        kb_id: int,
+        query: str,
+        k: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """
+        纯 Sparse BM25 检索（使用 Qdrant 稀疏向量）
+
+        Args:
+            kb_id: 知识库 ID
+            query: 查询文本
+            k: 返回结果数量
+
+        Returns:
+            检索结果列表，每项包含 content, metadata, score
+        """
+        from qdrant_client.http import models as rest
+
+        collection_name = self._ensure_collection(kb_id)
+
+        # 生成查询稀疏向量
+        query_sparse_list = list(self.sparse_embedder.embed([query]))
+        query_sparse = rest.SparseVector(
+            indices=query_sparse_list[0].indices.tolist(),
+            values=query_sparse_list[0].values.tolist(),
+        )
+
+        try:
+            kb_filter = self._kb_filter(kb_id)
+            results = self.client.query_points(
+                collection_name=collection_name,
+                query=query_sparse,
+                using="bm25",
+                query_filter=kb_filter,
+                limit=k,
+                with_payload=True,
+            )
+
+            items = []
+            for hit in results.points:
+                payload = hit.payload or {}
+                items.append(
+                    {
+                        "content": payload.get("content", ""),
+                        "metadata": {
+                            k: v
+                            for k, v in payload.items()
+                            if k not in ("content", "kb_id")
+                        },
+                        "score": float(hit.score) if hit.score else 0.0,
+                    }
+                )
+
+            return items
+        except Exception as e:
+            logger.warning("Qdrant BM25 检索失败 kb_id=%d: %s", kb_id, e)
+            return []
+
+    def delete_by_metadata(
+        self,
+        kb_id: int,
+        filter_key: str,
+        filter_value: str,
+    ) -> int:
+        """
+        按元数据条件删除向量
+
+        Args:
+            kb_id: 知识库 ID
+            filter_key: 过滤键
+            filter_value: 过滤值
+
+        Returns:
+            删除的向量数量
+        """
+        from qdrant_client.http import models as rest
+
+        collection_name = self._ensure_collection(kb_id)
+
+        try:
+            # 构建过滤条件（共享 collection 时追加 kb_id 隔离）
+            conditions = [
+                rest.FieldCondition(
+                    key="kb_id",
+                    match=rest.MatchValue(value=kb_id),
+                ),
+                rest.FieldCondition(
+                    key=filter_key,
+                    match=rest.MatchValue(value=filter_value),
+                ),
+            ]
+
+            # 查询匹配的记录
+            results = self.client.scroll(
+                collection_name=collection_name,
+                scroll_filter=rest.Filter(must=conditions),
+                limit=10000,
+                with_payload=False,
+                with_vectors=False,
+            )
+            points = results[0]
+
+            if not points:
+                return 0
+
+            # 删除匹配的点
+            point_ids = [point.id for point in points]
+            self.client.delete(
+                collection_name=collection_name,
+                points_selector=rest.PointIdsList(points=point_ids),
+            )
+
+            logger.info(
+                "已删除 %d 条向量 (kb_id=%d, %s=%s)",
+                len(point_ids),
+                kb_id,
+                filter_key,
+                filter_value,
+            )
+            return len(point_ids)
+        except Exception as e:
+            logger.warning("Qdrant 删除向量失败 kb_id=%d: %s", kb_id, e)
+            return 0
+
+    def delete_collection(self, kb_id: int) -> bool:
+        """
+        删除知识库的向量数据（按 kb_id 过滤删除对应 points，不影响其他知识库）
+
+        Args:
+            kb_id: 知识库 ID
+
+        Returns:
+            是否删除成功
+        """
+        from qdrant_client.http import models as rest
+
+        collection_name = self._get_collection_name(kb_id)
+
+        try:
+            collections = self.client.get_collections().collections
+            existing = {c.name for c in collections}
+
+            if collection_name not in existing:
+                return True
+
+            self.client.delete(
+                collection_name=collection_name,
+                points_selector=rest.FilterSelector(
+                    filter=self._kb_filter(kb_id),
+                ),
+            )
+            logger.info("已删除 Qdrant 知识库 %d 的向量 (collection: %s)", kb_id, collection_name)
+            return True
+        except Exception as e:
+            logger.error("删除 Qdrant 向量失败 kb_id=%d: %s", kb_id, e)
+            return False
+
+
+# ============ 工厂函数 ============
+
+
+def create_vector_store_service() -> VectorStoreBase:
+    """
+    根据配置创建向量存储服务实例
+
+    Returns:
+        VectorStoreBase 子类实例
+    """
+    store_type = settings.VECTOR_STORE
+
+    if store_type == "qdrant_vector":
+        if not settings.QDRANT_URL:
+            raise ValueError("VECTOR_STORE=qdrant_vector 但 QDRANT_URL 未配置")
+        logger.info("使用 Qdrant 向量数据库: %s", settings.QDRANT_URL)
+        return QdrantStoreService()
+    elif store_type == "sqlite_vector":
+        if not SQLITE_VEC_AVAILABLE:
+            raise ImportError("VECTOR_STORE=sqlite_vector 但 sqlite-vec 未安装")
+        logger.info("使用 SQLiteVec 向量数据库")
+        return SQLiteVecStoreService()
+    else:
+        raise ValueError(f"不支持的向量数据库类型: {store_type}")
+
+
+# 全局单例（延迟初始化）
+_vector_store_service: Optional[VectorStoreBase] = None
+
+
+def get_vector_store_service() -> VectorStoreBase:
+    """获取向量存储服务单例"""
+    global _vector_store_service
+    if _vector_store_service is None:
+        _vector_store_service = create_vector_store_service()
+    return _vector_store_service
+
+
+# 兼容旧代码的别名
+vector_store_service = None  # 将在首次访问时初始化
