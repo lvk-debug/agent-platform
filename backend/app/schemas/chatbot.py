@@ -80,6 +80,10 @@ class ChatbotConfig(BaseModel):
     query_expansion_enabled: bool = Field(False, description="启用查询扩展，用 LLM 扩充用户问题")
     query_expansion_prompt: Optional[str] = Field(None, description="查询扩展提示词，None 时使用默认模板")
 
+    # Rerank 重排序
+    rerank_enabled: bool = Field(False, description="启用重排序，对检索结果进行二次排序提升精度")
+    rerank_top_k: int = Field(3, ge=1, le=20, description="重排序后保留的 Top-K 结果数")
+
 
 class ChatbotUpdate(BaseModel):
     """聊天助手更新请求"""

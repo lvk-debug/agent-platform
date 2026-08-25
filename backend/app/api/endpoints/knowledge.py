@@ -579,6 +579,7 @@ async def search_knowledge_base(
         top_k=search_in.top_k,
         score_threshold=search_in.score_threshold,
         search_mode=search_in.search_mode,
+        enable_rerank=search_in.enable_rerank,
     )
 
     return SearchResponse(
@@ -586,6 +587,7 @@ async def search_knowledge_base(
         results=[SearchResultItem(**r) for r in results],
         total=len(results),
         search_mode=search_in.search_mode,
+        enable_rerank=search_in.enable_rerank,
     )
 
 

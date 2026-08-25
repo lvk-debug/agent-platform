@@ -51,6 +51,13 @@ export interface ToolCategory {
   icon: string
 }
 
+export interface ToolTestResult {
+  success: boolean
+  output?: any
+  error?: string
+  duration_ms: number
+}
+
 export const toolsApi = {
   // 获取工具列表
   getTools: () => {
@@ -97,5 +104,13 @@ export const toolsApi = {
   // 从 MCP Server 导入工具
   importMcp: (url: string) => {
     return api.post<ToolData[]>('/tools/import/mcp', { url })
+  },
+
+  // 测试工具执行
+  testTool: (id: number, inputData: Record<string, any> = {}, timeout: number = 30) => {
+    return api.post<ToolTestResult>(`/tools/${id}/test`, {
+      input_data: inputData,
+      timeout,
+    })
   },
 }

@@ -67,6 +67,7 @@ export interface SearchResultItem {
   metadata?: Record<string, any>
   vector_score?: number
   bm25_score?: number
+  rerank_score?: number
 }
 
 export interface SearchResponse {
@@ -74,6 +75,7 @@ export interface SearchResponse {
   results: SearchResultItem[]
   total: number
   search_mode: SearchMode
+  enable_rerank: boolean
 }
 
 export interface CrawlResponse {
@@ -164,12 +166,13 @@ export const knowledgeApi = {
   },
 
   // 知识库检索
-  searchKnowledgeBase: (kbId: number, query: string, top_k?: number, score_threshold?: number, search_mode?: SearchMode) => {
+  searchKnowledgeBase: (kbId: number, query: string, top_k?: number, score_threshold?: number, search_mode?: SearchMode, enable_rerank?: boolean) => {
     return api.post<SearchResponse>(`/knowledge/${kbId}/search`, {
       query,
       top_k: top_k ?? 5,
       score_threshold: score_threshold ?? 0,
       search_mode: search_mode ?? 'rrf',
+      enable_rerank: enable_rerank ?? false,
     })
   },
 

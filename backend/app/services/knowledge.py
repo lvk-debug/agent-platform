@@ -10,6 +10,7 @@ from app.models.knowledge import Document, DocumentSegment, KnowledgeBase
 from app.utils.logger import logger
 from app.core.config import settings
 from app.services.vector_store import get_vector_store_service
+from app.services.reranker import get_reranker_service
 
 
 class KnowledgeService:
@@ -686,6 +687,7 @@ class KnowledgeService:
         top_k: int = 5,
         score_threshold: float = 0.0,
         search_mode: str = "rrf",
+        enable_rerank: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         检索入口，根据 search_mode 分发到不同的检索策略
@@ -696,16 +698,30 @@ class KnowledgeService:
             top_k: 返回结果数量
             score_threshold: 分数阈值
             search_mode: 检索模式 (vector / bm25 / rrf)
+            enable_rerank: 是否启用重排序（BAAI/bge-reranker-base via fastembed）
 
         Returns:
             检索结果列表
         """
+        # 启用重排序时，先多取候选结果用于重排
+        fetch_top_k = top_k * 3 if enable_rerank else top_k
+
         if search_mode == "vector":
-            return await self._search_vector(kb_id, query, top_k, score_threshold)
+            results = await self._search_vector(kb_id, query, fetch_top_k, score_threshold)
         elif search_mode == "bm25":
-            return await self._search_bm25(kb_id, query, top_k, score_threshold)
+            results = await self._search_bm25(kb_id, query, fetch_top_k, score_threshold)
         else:
-            return await self._search_rrf(kb_id, query, top_k, score_threshold)
+            results = await self._search_rrf(kb_id, query, fetch_top_k, score_threshold, enable_rerank=enable_rerank)
+
+        # 重排序
+        if enable_rerank and results:
+            reranker = get_reranker_service()
+            results = await reranker.rerank(query, results, top_k=top_k)
+            # 重排序后用 rerank_score 替换最终 score
+            for r in results:
+                r["score"] = r.get("rerank_score", r["score"])
+
+        return results
 
     async def _search_vector(
         self,
@@ -802,6 +818,7 @@ class KnowledgeService:
         query: str,
         top_k: int,
         score_threshold: float,
+        enable_rerank: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         RRF (Reciprocal Rank Fusion) 混合检索
@@ -839,7 +856,7 @@ class KnowledgeService:
             self._enrich_results(results)
             return results
 
-        # SQLiteVec 后端：Python RRF 融合
+        #后端：Python RRF 融合
         RRF_K = 60
         fetch_k = top_k * 3  # 多取一些用于融合
 
@@ -898,8 +915,9 @@ class KnowledgeService:
         if max_rrf <= 0:
             max_rrf = 1.0
 
+        # 重排序时返回全部候选，由 reranker 做最终截断；否则截断到 top_k
         results = []
-        for sid in sorted_sids[:top_k]:
+        for sid in (sorted_sids if enable_rerank else sorted_sids[:top_k]):
             norm_score = rrf_scores[sid] / max_rrf
             if norm_score < score_threshold:
                 continue

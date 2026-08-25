@@ -1,12 +1,33 @@
 from typing import Any, Dict, List, Optional, AsyncIterator
+import json
 import httpx
 from app.core.config import settings
 from app.utils.logger import logger
 
+# ==================== 全局连接池（复用 TCP + TLS） ====================
+_http_client = httpx.AsyncClient(
+    limits=httpx.Limits(
+        max_keepalive_connections=20,   # 同一 host 最多保持 20 个空闲连接
+        max_connections=50,             # 总连接数上限
+        keepalive_expiry=30.0,          # 空闲连接保持 30 秒
+    ),
+    timeout=httpx.Timeout(
+        connect=10.0,                   # TCP 握手超时
+        read=120.0,                     # 读超时（LLM 生成可能较慢）
+        write=10.0,                     # 写超时
+        pool=5.0,                       # 从连接池获取连接的等待超时
+    ),
+)
+
+
+async def close_http_client():
+    """应用关闭时调用，释放连接池"""
+    await _http_client.aclose()
+
 
 class LLMService:
     """
-    LLM服务 - 统一的大语言模型调用接口
+    LLM服务 - 统一的大语言模型调用接口（复用全局连接池）
     """
 
     def __init__(self):
@@ -107,35 +128,33 @@ class LLMService:
         api_endpoint = config.get("api_endpoint", "https://api.openai.com/v1")
         api_key = config.get("api_key")
 
-        async with httpx.AsyncClient() as client:
-            logger.info(f"调用 OpenAI API: endpoint={api_endpoint}, model={model}")
-            response = await client.post(
-                f"{api_endpoint}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    **kwargs,
-                },
-                timeout=60.0,
-            )
-            logger.info(f"OpenAI API 响应状态: {response.status_code}")
-            if response.status_code != 200:
-                logger.error(f"OpenAI API 错误: {response.text}")
-            response.raise_for_status()
-            data = response.json()
+        logger.info(f"调用 OpenAI API: endpoint={api_endpoint}, model={model}")
+        response = await _http_client.post(
+            f"{api_endpoint}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                **kwargs,
+            },
+        )
+        logger.info(f"OpenAI API 响应状态: {response.status_code}")
+        if response.status_code != 200:
+            logger.error(f"OpenAI API 错误: {response.text}")
+        response.raise_for_status()
+        data = response.json()
 
-            return {
-                "content": data["choices"][0]["message"]["content"],
-                "model": data["model"],
-                "tokens_used": data.get("usage", {}),
-                "finish_reason": data["choices"][0]["finish_reason"],
-            }
+        return {
+            "content": data["choices"][0]["message"]["content"],
+            "model": data["model"],
+            "tokens_used": data.get("usage", {}),
+            "finish_reason": data["choices"][0]["finish_reason"],
+        }
 
     async def _openai_stream_chat(
         self,
@@ -152,35 +171,35 @@ class LLMService:
         api_endpoint = config.get("api_endpoint", "https://api.openai.com/v1")
         api_key = config.get("api_key")
 
-        async with httpx.AsyncClient() as client:
-            async with client.stream(
-                "POST",
-                f"{api_endpoint}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "stream": True,
-                    **kwargs,
-                },
-                timeout=60.0,
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if line.startswith("data: "):
-                        line = line[6:]
-                        if line.strip() == "[DONE]":
-                            break
-                        import json
-                        data = json.loads(line)
-                        delta = data["choices"][0].get("delta", {})
-                        if "content" in delta:
-                            yield delta["content"]
+        async with _http_client.stream(
+            "POST",
+            f"{api_endpoint}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": True,
+                **kwargs,
+            },
+        ) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if line.startswith("data: "):
+                    line = line[6:]
+                    if line.strip() == "[DONE]":
+                        break
+                    data = json.loads(line)
+                    choices = data.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
+                    if "content" in delta:
+                        yield delta["content"]
 
     async def _anthropic_chat(
         self,
@@ -206,36 +225,34 @@ class LLMService:
             else:
                 formatted_messages.append(msg)
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{api_endpoint}/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "system": system_message or "",
-                    "messages": formatted_messages,
-                    **kwargs,
-                },
-                timeout=60.0,
-            )
-            response.raise_for_status()
-            data = response.json()
+        response = await _http_client.post(
+            f"{api_endpoint}/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "system": system_message or "",
+                "messages": formatted_messages,
+                **kwargs,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
 
-            return {
-                "content": data["content"][0]["text"],
-                "model": data["model"],
-                "tokens_used": {
-                    "prompt_tokens": data.get("usage", {}).get("input_tokens", 0),
-                    "completion_tokens": data.get("usage", {}).get("output_tokens", 0),
-                },
-                "finish_reason": data["stop_reason"],
-            }
+        return {
+            "content": data["content"][0]["text"],
+            "model": data["model"],
+            "tokens_used": {
+                "prompt_tokens": data.get("usage", {}).get("input_tokens", 0),
+                "completion_tokens": data.get("usage", {}).get("output_tokens", 0),
+            },
+            "finish_reason": data["stop_reason"],
+        }
 
     async def _anthropic_stream_chat(
         self,
@@ -261,34 +278,31 @@ class LLMService:
             else:
                 formatted_messages.append(msg)
 
-        async with httpx.AsyncClient() as client:
-            async with client.stream(
-                "POST",
-                f"{api_endpoint}/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "system": system_message or "",
-                    "messages": formatted_messages,
-                    "stream": True,
-                    **kwargs,
-                },
-                timeout=60.0,
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if line.startswith("data: "):
-                        line = line[6:]
-                        import json
-                        data = json.loads(line)
-                        if data["type"] == "content_block_delta":
-                            yield data["delta"]["text"]
+        async with _http_client.stream(
+            "POST",
+            f"{api_endpoint}/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "system": system_message or "",
+                "messages": formatted_messages,
+                "stream": True,
+                **kwargs,
+            },
+        ) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if line.startswith("data: "):
+                    line = line[6:]
+                    data = json.loads(line)
+                    if data["type"] == "content_block_delta":
+                        yield data["delta"]["text"]
 
 
 # 创建全局LLM服务实例

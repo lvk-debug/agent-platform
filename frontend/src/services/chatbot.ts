@@ -2,6 +2,7 @@
  * 聊天助手 API 服务
  */
 import api from './api';
+import { useAuthStore } from '../stores/auth';
 
 // 类型定义
 export type VariableType = 'text_input' | 'paragraph' | 'select' | 'number' | 'checkbox' | 'api_variable';
@@ -61,6 +62,9 @@ export interface ChatbotConfig {
   // Query 扩展
   query_expansion_enabled: boolean;
   query_expansion_prompt?: string;
+  // Rerank 重排序
+  rerank_enabled: boolean;
+  rerank_top_k: number;
 }
 
 export interface ChatRequest {
@@ -117,6 +121,73 @@ export const chatbotApi = {
   chat: async (appId: number, request: ChatRequest): Promise<ChatResponse> => {
     const response = await api.post(`/chatbot/${appId}/chat`, request);
     return response.data;
+  },
+
+  /**
+   * 流式发送聊天消息 (SSE)
+   * 返回异步迭代器，逐步 yield 事件
+   */
+  chatStream: async function* (appId: number, request: ChatRequest) {
+    const token = useAuthStore.getState().token;
+    const response = await fetch(`/api/v1/chatbot/${appId}/chat/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(request),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: '请求失败' }));
+      yield { event: 'error', data: { message: error.detail || '请求失败' } };
+      return;
+    }
+
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let eventType = '';
+    let eventData = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // 解析 SSE 事件
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';  // 保留未完成的行
+
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          eventType = line.slice(7).trim();
+        } else if (line.startsWith('data: ')) {
+          eventData = line.slice(6);
+        } else if (line === '' && eventType && eventData) {
+          // 空行表示事件结束
+          try {
+            const data = JSON.parse(eventData);
+            yield { event: eventType, data };
+          } catch (e) {
+            console.error('SSE 解析失败:', e, eventData);
+          }
+          eventType = '';
+          eventData = '';
+        }
+      }
+    }
+
+    // 处理 buffer 中剩余的数据
+    if (eventType && eventData) {
+      try {
+        const data = JSON.parse(eventData);
+        yield { event: eventType, data };
+      } catch (e) {
+        console.error('SSE 解析失败:', e, eventData);
+      }
+    }
   },
 
   /**

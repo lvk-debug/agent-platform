@@ -1,4 +1,4 @@
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -28,6 +28,20 @@ class ToolTemplateResponse(BaseModel):
     category: str
     icon: str
     tool_type: str
+
+
+class ToolTestRequest(BaseModel):
+    """工具测试请求"""
+    input_data: Dict[str, Any] = {}
+    timeout: float = 30.0
+
+
+class ToolTestResponse(BaseModel):
+    """工具测试响应"""
+    success: bool
+    output: Any = None
+    error: Optional[str] = None
+    duration_ms: int = 0
 
 
 @router.get("/", response_model=List[ToolResponse])
@@ -70,89 +84,8 @@ def create_tool(
     return tool
 
 
-@router.get("/{tool_id}", response_model=ToolResponse)
-def read_tool(
-    *,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    tool_id: int,
-) -> Any:
-    """
-    获取工具详情
-    """
-    tool = db.query(Tool).filter(Tool.id == tool_id).first()
-    if not tool:
-        raise HTTPException(
-            status_code=404,
-            detail="工具不存在",
-        )
-    return tool
-
-
-@router.put("/{tool_id}", response_model=ToolResponse)
-def update_tool(
-    *,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    tool_id: int,
-    tool_in: ToolUpdate,
-) -> Any:
-    """
-    更新工具
-    """
-    tool = db.query(Tool).filter(Tool.id == tool_id).first()
-    if not tool:
-        raise HTTPException(
-            status_code=404,
-            detail="工具不存在",
-        )
-
-    # 更新工具信息
-    if tool_in.name is not None:
-        tool.name = tool_in.name
-    if tool_in.description is not None:
-        tool.description = tool_in.description
-    if tool_in.icon is not None:
-        tool.icon = tool_in.icon
-    if tool_in.parameters_schema is not None:
-        tool.parameters_schema = tool_in.parameters_schema
-    if tool_in.return_schema is not None:
-        tool.return_schema = tool_in.return_schema
-    if tool_in.endpoint is not None:
-        tool.endpoint = tool_in.endpoint
-    if tool_in.auth_config is not None:
-        tool.auth_config = tool_in.auth_config
-    if tool_in.is_active is not None:
-        tool.is_active = tool_in.is_active
-
-    db.commit()
-    db.refresh(tool)
-    return tool
-
-
-@router.delete("/{tool_id}")
-def delete_tool(
-    *,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    tool_id: int,
-) -> Any:
-    """
-    删除工具
-    """
-    tool = db.query(Tool).filter(Tool.id == tool_id).first()
-    if not tool:
-        raise HTTPException(
-            status_code=404,
-            detail="工具不存在",
-        )
-
-    db.delete(tool)
-    db.commit()
-    return {"message": "工具已删除"}
-
-
 # ============ 工具模板 / 安装 / MCP 导入 ============
+# 注意: 静态路由必须在 /{tool_id} 动态路由之前注册，否则会被路径参数拦截
 
 @router.get("/templates", response_model=List[ToolTemplateResponse])
 def list_templates() -> Any:
@@ -249,3 +182,116 @@ async def import_mcp(
 
     db.commit()
     return created_tools
+
+
+@router.get("/{tool_id}", response_model=ToolResponse)
+def read_tool(
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tool_id: int,
+) -> Any:
+    """
+    获取工具详情
+    """
+    tool = db.query(Tool).filter(Tool.id == tool_id).first()
+    if not tool:
+        raise HTTPException(
+            status_code=404,
+            detail="工具不存在",
+        )
+    return tool
+
+
+@router.put("/{tool_id}", response_model=ToolResponse)
+def update_tool(
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tool_id: int,
+    tool_in: ToolUpdate,
+) -> Any:
+    """
+    更新工具
+    """
+    tool = db.query(Tool).filter(Tool.id == tool_id).first()
+    if not tool:
+        raise HTTPException(
+            status_code=404,
+            detail="工具不存在",
+        )
+
+    # 更新工具信息
+    if tool_in.name is not None:
+        tool.name = tool_in.name
+    if tool_in.description is not None:
+        tool.description = tool_in.description
+    if tool_in.icon is not None:
+        tool.icon = tool_in.icon
+    if tool_in.parameters_schema is not None:
+        tool.parameters_schema = tool_in.parameters_schema
+    if tool_in.return_schema is not None:
+        tool.return_schema = tool_in.return_schema
+    if tool_in.endpoint is not None:
+        tool.endpoint = tool_in.endpoint
+    if tool_in.auth_config is not None:
+        tool.auth_config = tool_in.auth_config
+    if tool_in.is_active is not None:
+        tool.is_active = tool_in.is_active
+
+    db.commit()
+    db.refresh(tool)
+    return tool
+
+
+@router.delete("/{tool_id}")
+def delete_tool(
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tool_id: int,
+) -> Any:
+    """
+    删除工具
+    """
+    tool = db.query(Tool).filter(Tool.id == tool_id).first()
+    if not tool:
+        raise HTTPException(
+            status_code=404,
+            detail="工具不存在",
+        )
+
+    db.delete(tool)
+    db.commit()
+    return {"message": "工具已删除"}
+
+
+@router.post("/{tool_id}/test", response_model=ToolTestResponse)
+async def test_tool(
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tool_id: int,
+    data: ToolTestRequest,
+) -> Any:
+    """
+    测试工具执行
+
+    使用提供的输入参数执行工具，返回执行结果。
+    用于工具安装后的连通性验证。
+    """
+    tool = db.query(Tool).filter(Tool.id == tool_id).first()
+    if not tool:
+        raise HTTPException(status_code=404, detail="工具不存在")
+
+    from app.services.tool_executor import get_tool_executor
+
+    executor = get_tool_executor()
+    result = await executor.execute(tool, data.input_data, timeout=data.timeout)
+
+    return ToolTestResponse(
+        success=result["success"],
+        output=result["output"],
+        error=result.get("error"),
+        duration_ms=result.get("duration_ms", 0),
+    )

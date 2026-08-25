@@ -1,24 +1,20 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  Layout,
-  Card,
   Input,
   Button,
-  List,
   Typography,
-  Space,
   Tag,
   Avatar,
   Spin,
   message,
-  Empty,
   Popconfirm,
   Drawer,
   Timeline,
   Collapse,
   Badge,
   Tooltip,
+  List,
 } from 'antd';
 import {
   SendOutlined,
@@ -29,18 +25,15 @@ import {
   DeleteOutlined,
   PlusOutlined,
   MessageOutlined,
-  ToolOutlined,
   CheckCircleOutlined,
   LoadingOutlined,
   BookOutlined,
-  LinkOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
   BugOutlined,
   ClockCircleOutlined,
+  PaperClipOutlined,
 } from '@ant-design/icons';
-import { chatbotApi, ChatRequest, ChatResponse, Conversation, Message as ChatMessage } from '../services/chatbot';
-import { agentApi, AgentChatRequest, AgentChatResponse } from '../services/agent';
+import { chatbotApi, ChatRequest } from '../services/chatbot';
+import { agentApi, AgentChatRequest } from '../services/agent';
 import { appsApi, AppData } from '../services/apps';
 
 // 工具调用记录类型
@@ -86,6 +79,44 @@ interface SessionData {
   updatedAt: Date;
 }
 
+// 按时间分组会话
+const groupSessions = (sessions: SessionData[]) => {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const thirtyDaysAgo = new Date(today);
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+  const groups: { label: string; items: SessionData[] }[] = [];
+  const pinned: SessionData[] = [];
+  const todayItems: SessionData[] = [];
+  const monthItems: SessionData[] = [];
+  const olderItems: Map<string, SessionData[]> = new Map();
+
+  for (const s of sessions) {
+    const d = s.updatedAt;
+    if (d >= today) {
+      todayItems.push(s);
+    } else if (d >= thirtyDaysAgo) {
+      monthItems.push(s);
+    } else {
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      if (!olderItems.has(key)) olderItems.set(key, []);
+      olderItems.get(key)!.push(s);
+    }
+  }
+
+  if (pinned.length) groups.push({ label: '置顶', items: pinned });
+  if (todayItems.length) groups.push({ label: '今天', items: todayItems });
+  if (monthItems.length) groups.push({ label: '30 天内', items: monthItems });
+  // 按时间倒序输出更早的分组
+  const sortedKeys = Array.from(olderItems.keys()).sort().reverse();
+  for (const key of sortedKeys) {
+    const [y, m] = key.split('-');
+    groups.push({ label: `${y}-${m}`, items: olderItems.get(key)! });
+  }
+  return groups;
+};
+
 const AppRunner: React.FC = () => {
   const { appId } = useParams<{ appId: string }>();
   const navigate = useNavigate();
@@ -97,11 +128,13 @@ const AppRunner: React.FC = () => {
   const [currentSession, setCurrentSession] = useState<SessionData | null>(null);
   const [inputValue, setInputValue] = useState('');
   const [sending, setSending] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   // Agent 运行日志抽屉
   const [logDrawerOpen, setLogDrawerOpen] = useState(false);
   const [selectedMessageLogs, setSelectedMessageLogs] = useState<ToolCallRecord[]>([]);
+
+  // 会话分组
+  const sessionGroups = useMemo(() => groupSessions(sessions), [sessions]);
 
   // 加载应用信息
   useEffect(() => {
@@ -195,14 +228,12 @@ const AppRunner: React.FC = () => {
   }, [currentSession?.messages]);
 
   // 查看消息的运行日志
-  const handleViewLogs = (message: ExtendedMessage) => {
-    const logs = message.tool_calls || [];
+  const handleViewLogs = (msg: ExtendedMessage) => {
+    const logs = msg.tool_calls || [];
     setSelectedMessageLogs(logs);
     setLogDrawerOpen(true);
-
-    // 调试：打印元数据到控制台
-    if (message.metadata) {
-      console.log('Agent 响应元数据:', message.metadata);
+    if (msg.metadata) {
+      console.log('Agent 响应元数据:', msg.metadata);
     }
     console.log('Agent 工具调用记录:', logs);
   };
@@ -231,15 +262,12 @@ const AppRunner: React.FC = () => {
     setSending(true);
 
     try {
-      let response: ChatResponse | AgentChatResponse;
-
       if (app.app_type === 'agent') {
         const request: AgentChatRequest = {
           query,
           conversation_id: currentSession.conversation_id,
         };
 
-        // === 流式 Agent 调用 ===
         const assistantMsgId = (Date.now() + 1).toString();
         const assistantMessage: ExtendedMessage = {
           id: assistantMsgId,
@@ -250,12 +278,8 @@ const AppRunner: React.FC = () => {
           metadata: {},
         };
 
-        // 先添加空的助手消息，后续逐步更新
         const streamingMessages = [...updatedMessages, assistantMessage];
-        setCurrentSession({
-          ...updatedSession,
-          messages: streamingMessages,
-        });
+        setCurrentSession({ ...updatedSession, messages: streamingMessages });
 
         let finalConversationId = currentSession.conversation_id;
         let finalMetadata: Record<string, any> = {};
@@ -264,20 +288,16 @@ const AppRunner: React.FC = () => {
           for await (const event of agentApi.chatStream(Number(appId), request)) {
             switch (event.event) {
               case 'message': {
-                // 逐字追加回答内容
                 assistantMessage.content += event.data.content;
                 setCurrentSession(prev => ({
                   ...prev!,
                   messages: prev!.messages.map(m =>
-                    m.id === assistantMsgId
-                      ? { ...m, content: assistantMessage.content }
-                      : m
+                    m.id === assistantMsgId ? { ...m, content: assistantMessage.content } : m
                   ),
                 }));
                 break;
               }
               case 'tool_start': {
-                // 添加工具调用记录（running 状态）
                 const newToolCall: ToolCallRecord = {
                   id: `${assistantMsgId}_tool_${Date.now()}`,
                   messageId: assistantMsgId,
@@ -299,7 +319,6 @@ const AppRunner: React.FC = () => {
                 break;
               }
               case 'tool_end': {
-                // 更新工具调用状态
                 setCurrentSession(prev => ({
                   ...prev!,
                   messages: prev!.messages.map(m => {
@@ -314,14 +333,11 @@ const AppRunner: React.FC = () => {
                 }));
                 break;
               }
-              case 'thinking': {
-                // 思考过程实时显示（追加到内容前面）
+              case 'thinking':
                 break;
-              }
               case 'done': {
                 finalConversationId = event.data.conversation_id;
                 finalMetadata = event.data.metadata;
-                // 更新最终的 metadata 和 tool_calls
                 setCurrentSession(prev => {
                   if (!prev) return prev;
                   const finalMessages = prev.messages.map(m =>
@@ -343,11 +359,7 @@ const AppRunner: React.FC = () => {
                         }
                       : m
                   );
-                  return {
-                    ...prev,
-                    messages: finalMessages,
-                    conversation_id: event.data.conversation_id,
-                  };
+                  return { ...prev, messages: finalMessages, conversation_id: event.data.conversation_id };
                 });
                 break;
               }
@@ -356,9 +368,12 @@ const AppRunner: React.FC = () => {
                 setCurrentSession(prev => ({
                   ...prev!,
                   messages: prev!.messages.map(m =>
-                    m.id === assistantMsgId
-                      ? { ...m, content: `⚠️ ${event.data.message}` }
-                      : m
+                    m.id === assistantMsgId ? {
+                      ...m,
+                      content: `⚠️ ${event.data.message}`,
+                      // 保留已收集的 tool_calls（执行中途出错时工具调用记录仍有价值）
+                      tool_calls: m.tool_calls && m.tool_calls.length > 0 ? m.tool_calls : undefined,
+                    } : m
                   ),
                 }));
                 break;
@@ -371,63 +386,113 @@ const AppRunner: React.FC = () => {
           setCurrentSession(prev => ({
             ...prev!,
             messages: prev!.messages.map(m =>
-              m.id === assistantMsgId
-                ? { ...m, content: `⚠️ 请求失败: ${err.message}` }
-                : m
+              m.id === assistantMsgId ? {
+                ...m,
+                content: `⚠️ 请求失败: ${err.message}`,
+                tool_calls: m.tool_calls && m.tool_calls.length > 0 ? m.tool_calls : undefined,
+              } : m
             ),
           }));
         }
 
-        // 更新会话
-        const finalSession = {
-          ...currentSession,
-          conversation_id: finalConversationId,
-          title: currentSession.title.startsWith('会话') ?
-            query.substring(0, 20) + (query.length > 20 ? '...' : '') :
-            currentSession.title,
-        };
-        setCurrentSession(finalSession);
-
-        const newSessions = sessions.map(s =>
-          s.id === finalSession.id ? finalSession : s
-        );
-        saveSessions(newSessions);
+        setCurrentSession(prev => {
+          if (!prev) return prev;
+          const finalSession = {
+            ...prev,
+            conversation_id: finalConversationId,
+            title: prev.title.startsWith('会话')
+              ? query.substring(0, 20) + (query.length > 20 ? '...' : '')
+              : prev.title,
+          };
+          saveSessions(sessions.map(s => s.id === finalSession.id ? finalSession : s));
+          return finalSession;
+        });
 
       } else {
+        // 流式聊天助手调用
         const request: ChatRequest = {
           query,
           conversation_id: currentSession.conversation_id,
         };
-        response = await chatbotApi.chat(Number(appId), request);
 
-        const chatResp = response as ChatResponse;
+        const assistantMsgId = (Date.now() + 1).toString();
         const assistantMessage: ExtendedMessage = {
-          id: (Date.now() + 1).toString(),
+          id: assistantMsgId,
           role: 'assistant',
-          content: chatResp.answer,
+          content: '',
           timestamp: new Date(),
-          citations: chatResp.metadata?.citations,
+          citations: [],
         };
 
-        const finalMessages = [...updatedMessages, assistantMessage];
-        const finalSession = {
-          ...updatedSession,
-          messages: finalMessages,
-          conversation_id: chatResp.conversation_id,
-          title: currentSession.title.startsWith('会话') ?
-            query.substring(0, 20) + (query.length > 20 ? '...' : '') :
-            currentSession.title,
-        };
-        setCurrentSession(finalSession);
+        const streamingMessages = [...updatedMessages, assistantMessage];
+        setCurrentSession({ ...updatedSession, messages: streamingMessages });
 
-        const newSessions = sessions.map(s =>
-          s.id === finalSession.id ? finalSession : s
-        );
-        saveSessions(newSessions);
+        let finalConversationId = currentSession.conversation_id;
+        let finalCitations: Array<{ content: string; knowledge_base: string; score: number; document_name?: string }> = [];
+
+        try {
+          for await (const event of chatbotApi.chatStream(Number(appId), request)) {
+            switch (event.event) {
+              case 'message': {
+                assistantMessage.content += event.data.content;
+                setCurrentSession(prev => ({
+                  ...prev!,
+                  messages: prev!.messages.map(m =>
+                    m.id === assistantMsgId ? { ...m, content: assistantMessage.content } : m
+                  ),
+                }));
+                break;
+              }
+              case 'done': {
+                finalConversationId = event.data.conversation_id;
+                finalCitations = event.data.metadata?.citations || [];
+                setCurrentSession(prev => {
+                  if (!prev) return prev;
+                  const finalMessages = prev.messages.map(m =>
+                    m.id === assistantMsgId ? { ...m, citations: finalCitations } : m
+                  );
+                  return { ...prev, messages: finalMessages, conversation_id: event.data.conversation_id };
+                });
+                break;
+              }
+              case 'error': {
+                assistantMessage.content = `⚠️ ${event.data.message}`;
+                setCurrentSession(prev => ({
+                  ...prev!,
+                  messages: prev!.messages.map(m =>
+                    m.id === assistantMsgId ? { ...m, content: `⚠️ ${event.data.message}` } : m
+                  ),
+                }));
+                break;
+              }
+            }
+          }
+        } catch (err: any) {
+          console.error('聊天助手流式调用失败:', err);
+          assistantMessage.content = `⚠️ 请求失败: ${err.message}`;
+          setCurrentSession(prev => ({
+            ...prev!,
+            messages: prev!.messages.map(m =>
+              m.id === assistantMsgId ? { ...m, content: `⚠️ 请求失败: ${err.message}` } : m
+            ),
+          }));
+        }
+
+        setCurrentSession(prev => {
+          if (!prev) return prev;
+          const finalSession = {
+            ...prev,
+            conversation_id: finalConversationId,
+            title: prev.title.startsWith('会话')
+              ? query.substring(0, 20) + (query.length > 20 ? '...' : '')
+              : prev.title,
+          };
+          saveSessions(sessions.map(s => s.id === finalSession.id ? finalSession : s));
+          return finalSession;
+        });
       }
     } catch (error: any) {
       console.error('发送消息失败:', error);
-      // 更详细的错误提示
       const errorMsg = error.response?.data?.detail || error.message || '发送失败';
       message.error(`错误: ${errorMsg}`);
     } finally {
@@ -445,15 +510,12 @@ const AppRunner: React.FC = () => {
       updatedAt: new Date(),
     };
     setCurrentSession(clearedSession);
-    const newSessions = sessions.map(s =>
-      s.id === clearedSession.id ? clearedSession : s
-    );
-    saveSessions(newSessions);
+    saveSessions(sessions.map(s => s.id === clearedSession.id ? clearedSession : s));
   };
 
   if (loading) {
     return (
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
+      <div className="flex justify-center items-center h-screen bg-page">
         <Spin size="large" />
       </div>
     );
@@ -464,410 +526,289 @@ const AppRunner: React.FC = () => {
   const isAgent = app.app_type === 'agent';
 
   return (
-    <Layout style={{ height: '100vh', background: '#f5f5f5' }}>
-      {/* 顶部导航 */}
-      <div style={{
-        background: '#fff',
-        padding: '12px 24px',
-        borderBottom: '1px solid #e8e8e8',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-      }}>
-        <Space>
-          <Button
-            icon={sidebarCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-          />
-          <Button
-            icon={<ArrowLeftOutlined />}
-            onClick={() => navigate('/apps')}
+    <div className="flex h-screen bg-page overflow-hidden">
+      {/* ===== 左侧 chatHistory ===== */}
+      <div className="w-72 flex-shrink-0 bg-sidebar border-r border-border flex flex-col h-full">
+        {/* 顶部：新建对话 */}
+        <div className="p-3 border-b border-border">
+          <button
+            onClick={handleNewSession}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-button
+              border border-border text-text-primary hover:bg-gray-50 transition-colors cursor-pointer"
           >
-            返回
-          </Button>
-          <Typography.Title level={5} style={{ margin: 0 }}>
-            {app.name}
-          </Typography.Title>
-          <Tag color={isAgent ? 'blue' : 'green'}>
-            {isAgent ? 'Agent' : '聊天助手'}
-          </Tag>
-        </Space>
-        <Space>
-          {currentSession && (
-            <Popconfirm
-              title="确定清空当前会话？"
-              onConfirm={handleClearSession}
-            >
-              <Button icon={<DeleteOutlined />}>清空会话</Button>
-            </Popconfirm>
+            <PlusOutlined />
+            <span>开启新对话</span>
+          </button>
+        </div>
+
+        {/* 会话列表 */}
+        <div className="flex-1 overflow-y-auto py-2">
+          {sessionGroups.length === 0 ? (
+            <div className="px-4 py-8 text-center text-text-secondary text-sm">
+              暂无对话记录
+            </div>
+          ) : (
+            sessionGroups.map(group => (
+              <div key={group.label} className="mb-2">
+                {/* 分组标题 */}
+                <div className="px-4 py-1.5 text-xs text-text-secondary font-medium">
+                  {group.label}
+                </div>
+                {/* 分组内的会话项 */}
+                {group.items.map(session => (
+                  <div
+                    key={session.id}
+                    onClick={() => handleSwitchSession(session)}
+                    className={`
+                      group relative flex items-center gap-2 px-4 py-2.5 mx-2 rounded-lg cursor-pointer
+                      transition-colors duration-150
+                      ${currentSession?.id === session.id
+                        ? 'bg-primary-bg text-primary'
+                        : 'text-text-primary hover:bg-gray-100'
+                      }
+                    `}
+                  >
+                    <MessageOutlined className="text-sm flex-shrink-0 opacity-60" />
+                    <span className="flex-1 text-sm truncate">{session.title}</span>
+                    {/* 删除按钮 */}
+                    <Popconfirm
+                      title="确定删除此会话？"
+                      onConfirm={(e) => { e?.stopPropagation(); handleDeleteSession(session.id); }}
+                      onCancel={(e) => e?.stopPropagation()}
+                    >
+                      <DeleteOutlined
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-xs opacity-0 group-hover:opacity-60 hover:!opacity-100 transition-opacity flex-shrink-0"
+                      />
+                    </Popconfirm>
+                  </div>
+                ))}
+              </div>
+            ))
           )}
-          <Button
-            icon={<SettingOutlined />}
-            onClick={() => navigate(`/apps/${appId}/agent-config`)}
-          >
-            配置
-          </Button>
-        </Space>
+        </div>
       </div>
 
-      <Layout style={{ background: '#f5f5f5' }}>
-        {/* 会话侧边栏 */}
-        {!sidebarCollapsed && (
-          <div style={{
-            width: 280,
-            background: '#fff',
-            borderRight: '1px solid #e8e8e8',
-            display: 'flex',
-            flexDirection: 'column',
-          }}>
-            <div style={{ padding: '16px', borderBottom: '1px solid #e8e8e8' }}>
-              <Button
-                type="primary"
-                icon={<PlusOutlined />}
-                block
-                onClick={handleNewSession}
-              >
-                新建会话
-              </Button>
+      {/* ===== 右侧 chatMain ===== */}
+      <div className="flex-1 flex flex-col h-full min-w-0">
+        {/* 顶部导航栏 */}
+        <div className="flex items-center justify-between px-4 py-2.5 border-b border-border bg-sidebar flex-shrink-0">
+          <div className="flex items-center gap-2">
+            <Button
+              type="text"
+              icon={<ArrowLeftOutlined />}
+              onClick={() => navigate('/apps')}
+              size="small"
+            />
+            <Typography.Text strong className="text-base">
+              {app.name}
+            </Typography.Text>
+            <Tag color={isAgent ? 'blue' : 'green'} className="!ml-0">
+              {isAgent ? 'Agent' : '聊天助手'}
+            </Tag>
+          </div>
+          <div className="flex items-center gap-1">
+            {currentSession && (
+              <Popconfirm title="确定清空当前会话？" onConfirm={handleClearSession}>
+                <Button type="text" icon={<DeleteOutlined />} size="small" />
+              </Popconfirm>
+            )}
+            <Button
+              type="text"
+              icon={<SettingOutlined />}
+              size="small"
+              onClick={() => navigate(`/apps/${appId}/${isAgent ? 'agent' : 'chatbot'}`)}
+            />
+          </div>
+        </div>
+
+        {/* 消息区域 */}
+        <div className="flex-1 overflow-y-auto">
+          {!currentSession ? (
+            /* 无会话：欢迎页 */
+            <div className="flex flex-col items-center justify-center h-full gap-4">
+              <RobotOutlined className="text-6xl text-primary opacity-80" />
+              <Typography.Title level={4} className="!mb-0">
+                开始对话
+              </Typography.Title>
+              <Typography.Text type="secondary">
+                点击"开启新对话"开始与 {app.name} 交流
+              </Typography.Text>
             </div>
-            <div style={{ flex: 1, overflow: 'auto' }}>
-              <List
-                dataSource={sessions}
-                renderItem={(session) => (
-                  <div
-                    style={{
-                      padding: '12px 16px',
-                      cursor: 'pointer',
-                      background: currentSession?.id === session.id ? '#e6f7ff' : 'transparent',
-                      borderLeft: currentSession?.id === session.id ? '3px solid #1890ff' : '3px solid transparent',
-                      transition: 'all 0.2s',
-                    }}
-                    onClick={() => handleSwitchSession(session)}
-                    onMouseEnter={(e) => {
-                      if (currentSession?.id !== session.id) {
-                        e.currentTarget.style.background = '#fafafa';
-                      }
-                    }}
-                    onMouseLeave={(e) => {
-                      if (currentSession?.id !== session.id) {
-                        e.currentTarget.style.background = 'transparent';
-                      }
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Space>
-                        <MessageOutlined style={{ color: '#1890ff' }} />
-                        <Typography.Text strong ellipsis style={{ maxWidth: 150 }}>
-                          {session.title}
-                        </Typography.Text>
-                      </Space>
-                      <Popconfirm
-                        title="确定删除此会话？"
-                        onConfirm={(e) => {
-                          e?.stopPropagation();
-                          handleDeleteSession(session.id);
-                        }}
-                        onCancel={(e) => e?.stopPropagation()}
-                      >
-                        <Button
-                          type="text"
+          ) : currentSession.messages.length === 0 ? (
+            /* 有会话但无消息 */
+            <div className="flex flex-col items-center justify-center h-full gap-4">
+              <RobotOutlined className="text-6xl text-primary opacity-80" />
+              <Typography.Title level={4} className="!mb-0">
+                有什么可以帮你的？
+              </Typography.Title>
+              <Typography.Text type="secondary">
+                输入你的问题，开始与 {app.name} 对话
+              </Typography.Text>
+            </div>
+          ) : (
+            /* 消息列表 */
+            <div className="max-w-3xl mx-auto py-6 px-4">
+              {currentSession.messages.map((msg) => (
+                <div
+                  key={msg.id}
+                  className={`flex gap-3 mb-6 ${msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}
+                >
+                  {/* 头像 */}
+                  <Avatar
+                    icon={msg.role === 'user' ? <UserOutlined /> : <RobotOutlined />}
+                    className={`flex-shrink-0 ${
+                      msg.role === 'user' ? '!bg-primary' : '!bg-green-500'
+                    }`}
+                  />
+                  {/* 内容 */}
+                  <div className={`flex flex-col max-w-[80%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                    {/* 消息气泡 */}
+                    <div
+                      className={`
+                        rounded-card px-4 py-3 text-sm leading-relaxed
+                        ${msg.role === 'user'
+                          ? 'bg-primary text-white rounded-tr-sm'
+                          : 'bg-white text-gray-800 rounded-tl-sm shadow-bubble'
+                        }
+                      `}
+                    >
+                      <div className="whitespace-pre-wrap">{msg.content}</div>
+                    </div>
+
+                    {/* 知识库引用 */}
+                    {msg.citations && msg.citations.length > 0 && (
+                      <div className="mt-2 w-full bg-white rounded-card shadow-bubble overflow-hidden">
+                        <Collapse
+                          ghost
                           size="small"
-                          icon={<DeleteOutlined />}
-                          onClick={(e) => e.stopPropagation()}
+                          items={[{
+                            key: 'citations',
+                            label: (
+                              <span className="flex items-center gap-1.5 text-primary text-sm font-medium">
+                                <BookOutlined />
+                                知识库引用 ({msg.citations.length})
+                              </span>
+                            ),
+                            children: (
+                              <div className="space-y-2">
+                                {msg.citations.map((item, idx) => (
+                                  <div key={idx} className="text-sm">
+                                    <div className="flex items-center gap-2 mb-1">
+                                      <Tag color="blue" className="!text-xs">{item.knowledge_base}</Tag>
+                                      {item.document_name && (
+                                        <span className="text-xs text-text-secondary">📄 {item.document_name}</span>
+                                      )}
+                                      <span className="text-xs text-text-secondary">
+                                        相关度: {(item.score * 100).toFixed(1)}%
+                                      </span>
+                                    </div>
+                                    <div className="bg-page p-2 rounded text-xs leading-relaxed">
+                                      {item.content}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            ),
+                          }]}
                         />
-                      </Popconfirm>
-                    </div>
-                    <div style={{ marginTop: 4, fontSize: 12, color: '#999' }}>
-                      {session.messages.length} 条消息 · {session.updatedAt.toLocaleDateString()}
-                    </div>
+                      </div>
+                    )}
+
+                    {/* Agent 运行日志按钮 */}
+                    {isAgent && msg.role === 'assistant' && (
+                      <div className="mt-1.5">
+                        <Tooltip title="查看 Agent 运行日志">
+                          <Button
+                            size="small"
+                            type="dashed"
+                            icon={<BugOutlined />}
+                            onClick={() => handleViewLogs(msg)}
+                            className="!text-purple-600 !border-purple-400 hover:!text-purple-700"
+                          >
+                            运行日志 {msg.tool_calls ? `(${msg.tool_calls.length})` : ''}
+                          </Button>
+                        </Tooltip>
+                      </div>
+                    )}
+
+                    {/* 时间戳 */}
+                    <span className="text-xs text-text-secondary mt-1">
+                      {msg.timestamp.toLocaleTimeString()}
+                    </span>
                   </div>
-                )}
-              />
+                </div>
+              ))}
+              <div ref={messagesEndRef} />
+            </div>
+          )}
+        </div>
+
+        {/* ===== chatInput 底部输入区域 ===== */}
+        {currentSession && (
+          <div className="border-t border-border bg-sidebar flex-shrink-0">
+            <div className="max-w-3xl mx-auto px-4 py-3">
+              <div className="flex items-end gap-2 bg-white rounded-xl border border-gray-200 shadow-sm px-3 py-2 focus-within:border-primary focus-within:shadow-md transition-all">
+                {/* 附件按钮 */}
+                <Button
+                  type="text"
+                  icon={<PaperClipOutlined />}
+                  className="!text-text-secondary hover:!text-text-primary flex-shrink-0 mb-0.5"
+                />
+                {/* 输入框 */}
+                <Input.TextArea
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  placeholder="请输入消息..."
+                  autoSize={{ minRows: 1, maxRows: 6 }}
+                  onPressEnter={(e) => {
+                    if (!e.shiftKey) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                  disabled={sending}
+                  variant="borderless"
+                  className="!flex-1 !text-sm"
+                  styles={{ input: { padding: '4px 0', resize: 'none' } }}
+                />
+                {/* 发送按钮 */}
+                <button
+                  onClick={handleSend}
+                  disabled={!inputValue.trim() || sending}
+                  className={`
+                    flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center
+                    transition-all duration-200 mb-0.5 cursor-pointer
+                    ${inputValue.trim() && !sending
+                      ? 'bg-primary text-white hover:bg-primary-hover shadow-sm'
+                      : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                    }
+                  `}
+                >
+                  {sending ? (
+                    <LoadingOutlined className="text-sm" />
+                  ) : (
+                    <SendOutlined className="text-sm" />
+                  )}
+                </button>
+              </div>
+              <div className="text-center mt-1.5">
+                <span className="text-xs text-text-secondary opacity-50">
+                  内容由 AI 生成，仅供参考
+                </span>
+              </div>
             </div>
           </div>
         )}
-
-        {/* 主内容区 */}
-        <Layout style={{ background: '#f5f5f5' }}>
-          {/* 消息列表 */}
-          <div style={{
-            flex: 1,
-            overflow: 'auto',
-            padding: '24px',
-            background: '#f5f5f5',
-          }}>
-            {!currentSession ? (
-              <div style={{
-                display: 'flex',
-                justifyContent: 'center',
-                alignItems: 'center',
-                height: '100%',
-              }}>
-                <Card style={{ textAlign: 'center', maxWidth: 400 }}>
-                  <RobotOutlined style={{ fontSize: 64, color: '#1890ff', marginBottom: 24 }} />
-                  <Typography.Title level={4}>开始对话</Typography.Title>
-                  <Typography.Text type="secondary">
-                    点击"新建会话"开始与 {app.name} 交流
-                  </Typography.Text>
-                  <div style={{ marginTop: 24 }}>
-                    <Button
-                      type="primary"
-                      size="large"
-                      icon={<PlusOutlined />}
-                      onClick={handleNewSession}
-                    >
-                      新建会话
-                    </Button>
-                  </div>
-                </Card>
-              </div>
-            ) : currentSession.messages.length === 0 ? (
-              <div style={{
-                display: 'flex',
-                justifyContent: 'center',
-                alignItems: 'center',
-                height: '100%',
-              }}>
-                <Card style={{ textAlign: 'center', maxWidth: 400 }}>
-                  <RobotOutlined style={{ fontSize: 64, color: '#1890ff', marginBottom: 24 }} />
-                  <Typography.Title level={4}>有什么可以帮你的？</Typography.Title>
-                  <Typography.Text type="secondary">
-                    输入你的问题，开始与 {app.name} 对话
-                  </Typography.Text>
-                </Card>
-              </div>
-            ) : (
-              <div style={{ maxWidth: 900, margin: '0 auto' }}>
-                {currentSession.messages.map((msg) => (
-                  <div
-                    key={msg.id}
-                    style={{
-                      display: 'flex',
-                      justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                      marginBottom: 24,
-                    }}
-                  >
-                    <div style={{
-                      maxWidth: '80%',
-                      display: 'flex',
-                      gap: 12,
-                      flexDirection: msg.role === 'user' ? 'row-reverse' : 'row',
-                    }}>
-                      <Avatar
-                        icon={msg.role === 'user' ? <UserOutlined /> : <RobotOutlined />}
-                        style={{
-                          backgroundColor: msg.role === 'user' ? '#1890ff' : '#52c41a',
-                          flexShrink: 0,
-                        }}
-                      />
-                      <div style={{ flex: 1 }}>
-                        <Card
-                          size="small"
-                          style={{
-                            background: msg.role === 'user' ? '#1890ff' : '#fff',
-                            color: msg.role === 'user' ? '#fff' : 'inherit',
-                            borderRadius: 12,
-                            boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
-                          }}
-                          styles={{
-                            body: { padding: '12px 16px' },
-                          }}
-                        >
-                          <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
-                        </Card>
-
-                        {/* 知识库引用 */}
-                        {msg.citations && msg.citations.length > 0 && (
-                          <Card
-                            size="small"
-                            style={{
-                              marginTop: 12,
-                              background: '#fff',
-                              borderRadius: 12,
-                              boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
-                            }}
-                          >
-                            <Collapse
-                              ghost
-                              items={[
-                                {
-                                  key: 'citations',
-                                  label: (
-                                    <Space>
-                                      <BookOutlined style={{ color: '#1890ff' }} />
-                                      <Typography.Text strong style={{ color: '#1890ff' }}>
-                                        知识库引用 ({msg.citations.length})
-                                      </Typography.Text>
-                                    </Space>
-                                  ),
-                                  children: (
-                                    <List
-                                      size="small"
-                                      dataSource={msg.citations}
-                                      renderItem={(item, index) => (
-                                        <List.Item style={{ padding: '8px 0' }}>
-                                          <div style={{ width: '100%' }}>
-                                            <div style={{ marginBottom: 4 }}>
-                                              <Space>
-                                                <Tag color="blue">{item.knowledge_base}</Tag>
-                                                {item.document_name && (
-                                                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                                                    📄 {item.document_name}
-                                                  </Typography.Text>
-                                                )}
-                                                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                                                  相关度: {(item.score * 100).toFixed(1)}%
-                                                </Typography.Text>
-                                              </Space>
-                                            </div>
-                                            <div style={{
-                                              background: '#f5f5f5',
-                                              padding: 8,
-                                              borderRadius: 4,
-                                              fontSize: 13,
-                                              lineHeight: 1.6,
-                                            }}>
-                                              {item.content}
-                                            </div>
-                                          </div>
-                                        </List.Item>
-                                      )}
-                                    />
-                                  ),
-                                },
-                              ]}
-                            />
-                          </Card>
-                        )}
-
-                        {/* 快捷链接 */}
-                        {msg.quick_links && msg.quick_links.length > 0 && (
-                          <Card
-                            size="small"
-                            style={{
-                              marginTop: 12,
-                              background: '#fff',
-                              borderRadius: 12,
-                              boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
-                            }}
-                          >
-                            <Space direction="vertical" style={{ width: '100%' }}>
-                              <Space>
-                                <LinkOutlined style={{ color: '#52c41a' }} />
-                                <Typography.Text strong style={{ color: '#52c41a' }}>
-                                  相关链接
-                                </Typography.Text>
-                              </Space>
-                              {msg.quick_links.map((link, index) => (
-                                <a
-                                  key={index}
-                                  href={link.url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  style={{
-                                    display: 'block',
-                                    padding: '8px 12px',
-                                    background: '#f6ffed',
-                                    borderRadius: 6,
-                                    border: '1px solid #b7eb8f',
-                                    textDecoration: 'none',
-                                  }}
-                                >
-                                  <div style={{ fontWeight: 500, color: '#1890ff' }}>
-                                    🔗 {link.title}
-                                  </div>
-                                  {link.snippet && (
-                                    <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
-                                      {link.snippet}
-                                    </div>
-                                  )}
-                                </a>
-                              ))}
-                            </Space>
-                          </Card>
-                        )}
-
-                        {/* Agent 运行日志按钮 - 所有 Agent 回复都显示 */}
-                        {isAgent && msg.role === 'assistant' && (
-                          <div style={{ marginTop: 8 }}>
-                            <Tooltip title="查看 Agent 运行日志">
-                              <Button
-                                size="small"
-                                type="dashed"
-                                icon={<BugOutlined />}
-                                onClick={() => handleViewLogs(msg)}
-                                style={{ color: '#722ed1', borderColor: '#722ed1' }}
-                              >
-                                运行日志 {msg.tool_calls ? `(${msg.tool_calls.length})` : ''}
-                              </Button>
-                            </Tooltip>
-                          </div>
-                        )}
-
-                        <div style={{
-                          fontSize: 12,
-                          color: '#999',
-                          marginTop: 4,
-                          textAlign: msg.role === 'user' ? 'right' : 'left',
-                        }}>
-                          {msg.timestamp.toLocaleTimeString()}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-                <div ref={messagesEndRef} />
-              </div>
-            )}
-          </div>
-
-          {/* 输入区域 */}
-          {currentSession && (
-            <div style={{
-              padding: '24px',
-              background: '#fff',
-              borderTop: '1px solid #e8e8e8',
-            }}>
-              <div style={{ maxWidth: 900, margin: '0 auto' }}>
-                <Space.Compact style={{ width: '100%' }}>
-                  <Input.TextArea
-                    value={inputValue}
-                    onChange={(e) => setInputValue(e.target.value)}
-                    placeholder="输入你的问题... (Enter 发送，Shift+Enter 换行)"
-                    autoSize={{ minRows: 1, maxRows: 4 }}
-                    onPressEnter={(e) => {
-                      if (!e.shiftKey) {
-                        e.preventDefault();
-                        handleSend();
-                      }
-                    }}
-                    disabled={sending}
-                    style={{ flex: 1 }}
-                  />
-                  <Button
-                    type="primary"
-                    icon={sending ? <LoadingOutlined /> : <SendOutlined />}
-                    onClick={handleSend}
-                    loading={sending}
-                    disabled={!inputValue.trim()}
-                    style={{ height: 'auto' }}
-                  >
-                    发送
-                  </Button>
-                </Space.Compact>
-              </div>
-            </div>
-          )}
-        </Layout>
-      </Layout>
+      </div>
 
       {/* Agent 运行日志抽屉 */}
       <Drawer
         title={
-          <Space>
-            <BugOutlined style={{ color: '#722ed1' }} />
+          <span className="flex items-center gap-2">
+            <BugOutlined className="text-purple-600" />
             <span>Agent 运行日志</span>
-          </Space>
+          </span>
         }
         placement="right"
         width={600}
@@ -875,111 +816,69 @@ const AppRunner: React.FC = () => {
         onClose={() => setLogDrawerOpen(false)}
       >
         {selectedMessageLogs.length === 0 ? (
-          <div style={{ padding: 24 }}>
-            <Empty description="暂无工具调用记录" />
-            <Card size="small" title="调试信息" style={{ marginTop: 16 }}>
-              <Typography.Text type="secondary">
-                可能原因：<br/>
-                1. Agent 未配置工具<br/>
-                2. 工具调用未返回 intermediate_steps<br/>
-                3. 检查后端日志获取更多信息
-              </Typography.Text>
-            </Card>
+          <div className="p-6">
+            <div className="text-center text-text-secondary py-8">暂无工具调用记录</div>
+            <div className="mt-4 p-3 bg-page rounded-lg text-sm text-text-secondary">
+              可能原因：<br />
+              1. Agent 未配置工具<br />
+              2. 工具调用未返回 intermediate_steps<br />
+              3. 检查后端日志获取更多信息
+            </div>
           </div>
         ) : (
           <Timeline
-            items={selectedMessageLogs.map((log, index) => ({
-              dot: log.status === 'success' ?
-                <CheckCircleOutlined style={{ color: '#52c41a' }} /> :
-                log.status === 'error' ?
-                  <ClockCircleOutlined style={{ color: '#ff4d4f' }} /> :
-                  <LoadingOutlined style={{ color: '#1890ff' }} />,
+            items={selectedMessageLogs.map((log) => ({
+              dot: log.status === 'success'
+                ? <CheckCircleOutlined className="text-green-500" />
+                : log.status === 'error'
+                  ? <ClockCircleOutlined className="text-red-500" />
+                  : <LoadingOutlined className="text-primary" />,
               children: (
-                <Card
-                  size="small"
-                  style={{ marginBottom: 16 }}
-                  title={
-                    <Space>
-                      <Tag color="purple">{log.tool}</Tag>
-                      <Badge
-                        status={log.status === 'success' ? 'success' : log.status === 'error' ? 'error' : 'processing'}
-                        text={log.status === 'success' ? '成功' : log.status === 'error' ? '失败' : '执行中'}
-                      />
-                      {log.duration && (
-                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                          {log.duration}ms
-                        </Typography.Text>
-                      )}
-                    </Space>
-                  }
-                >
-                  {/* 思考过程 */}
+                <div className="mb-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Tag color="purple">{log.tool}</Tag>
+                    <Badge
+                      status={log.status === 'success' ? 'success' : log.status === 'error' ? 'error' : 'processing'}
+                      text={log.status === 'success' ? '成功' : log.status === 'error' ? '失败' : '执行中'}
+                    />
+                    {log.duration && (
+                      <span className="text-xs text-text-secondary">{log.duration}ms</span>
+                    )}
+                  </div>
                   {log.thought && (
-                    <div style={{
-                      marginBottom: 12,
-                      padding: '8px 12px',
-                      background: '#f0f5ff',
-                      borderRadius: 6,
-                      border: '1px solid #d6e4ff',
-                    }}>
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        💭 思考过程:
-                      </Typography.Text>
-                      <div style={{ marginTop: 4, fontSize: 13, whiteSpace: 'pre-wrap' }}>
-                        {log.thought}
-                      </div>
+                    <div className="mb-3 p-3 bg-blue-50 rounded-md border border-blue-200 text-sm">
+                      <span className="text-text-secondary text-xs">💭 思考过程:</span>
+                      <div className="mt-1 whitespace-pre-wrap">{log.thought}</div>
                     </div>
                   )}
-
                   <Collapse
                     ghost
                     size="small"
                     items={[
                       {
                         key: 'input',
-                        label: <Typography.Text strong>📥 工具输入</Typography.Text>,
+                        label: <span className="font-medium">📥 工具输入</span>,
                         children: (
-                          <pre style={{
-                            background: '#f5f5f5',
-                            padding: 12,
-                            borderRadius: 6,
-                            fontSize: 12,
-                            maxHeight: 200,
-                            overflow: 'auto',
-                            margin: 0,
-                            whiteSpace: 'pre-wrap',
-                            wordBreak: 'break-all',
-                          }}>
+                          <pre className="bg-page p-3 rounded-md text-xs max-h-48 overflow-auto m-0 whitespace-pre-wrap break-all">
                             {log.input}
                           </pre>
                         ),
                       },
                       {
                         key: 'output',
-                        label: <Typography.Text strong>📤 工具输出</Typography.Text>,
+                        label: <span className="font-medium">📤 工具输出</span>,
                         children: (
-                          <pre style={{
-                            background: '#f5f5f5',
-                            padding: 12,
-                            borderRadius: 6,
-                            fontSize: 12,
-                            maxHeight: 300,
-                            overflow: 'auto',
-                            margin: 0,
-                            whiteSpace: 'pre-wrap',
-                            wordBreak: 'break-all',
-                          }}>
+                          <pre className="bg-page p-3 rounded-md text-xs max-h-64 overflow-auto m-0 whitespace-pre-wrap break-all">
                             {log.output}
                           </pre>
                         ),
                       },
                     ]}
                   />
-
-                  <div style={{ marginTop: 8, fontSize: 12, color: '#999' }}>
+                  <div className="mt-2 text-xs text-text-secondary">
                     <ClockCircleOutlined /> {log.timestamp.toLocaleTimeString()}
                   </div>
-                </Card>
+                </div>
               ),
             }))}
           />
@@ -991,53 +890,37 @@ const AppRunner: React.FC = () => {
           const thoughts = selectedMsg?.metadata?.thoughts;
           return (
             <div>
-              {/* 思考过程汇总 */}
               {thoughts && thoughts.length > 0 && (
-                <Card size="small" title="💭 思考过程" style={{ marginTop: 16 }}>
+                <div className="mt-4">
+                  <div className="font-medium text-sm mb-2">💭 思考过程</div>
                   {thoughts.map((thought: string, idx: number) => (
-                    <div key={idx} style={{
-                      marginBottom: 8,
-                      padding: 8,
-                      background: '#fffbe6',
-                      borderRadius: 4,
-                      fontSize: 12,
-                    }}>
-                      <Typography.Text type="secondary">第 {idx + 1} 步推理：</Typography.Text>
-                      <div style={{ whiteSpace: 'pre-wrap', marginTop: 4 }}>{thought}</div>
+                    <div key={idx} className="mb-2 p-2 bg-yellow-50 rounded text-xs">
+                      <span className="text-text-secondary">第 {idx + 1} 步推理：</span>
+                      <div className="mt-1 whitespace-pre-wrap">{thought}</div>
                     </div>
                   ))}
-                </Card>
+                </div>
               )}
-              <Card size="small" title="📊 响应元数据" style={{ marginTop: 16 }}>
+              <div className="mt-4">
                 <Collapse
                   ghost
                   size="small"
-                  items={[
-                    {
-                      key: 'metadata',
-                      label: <Typography.Text type="secondary">查看完整元数据</Typography.Text>,
-                      children: (
-                        <pre style={{
-                          background: '#f5f5f5',
-                          padding: 12,
-                          borderRadius: 6,
-                          fontSize: 11,
-                          maxHeight: 300,
-                          overflow: 'auto',
-                          margin: 0,
-                        }}>
-                          {JSON.stringify(selectedMsg?.metadata || {}, null, 2)}
-                        </pre>
-                      ),
-                    },
-                  ]}
+                  items={[{
+                    key: 'metadata',
+                    label: <span className="text-sm text-text-secondary">📊 响应元数据</span>,
+                    children: (
+                      <pre className="bg-page p-3 rounded-md text-xs max-h-64 overflow-auto m-0">
+                        {JSON.stringify(selectedMsg?.metadata || {}, null, 2)}
+                      </pre>
+                    ),
+                  }]}
                 />
-              </Card>
+              </div>
             </div>
           );
         })()}
       </Drawer>
-    </Layout>
+    </div>
   );
 };
 

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Card, Button, message, Spin, Row, Col, Space, Breadcrumb, Switch, Input, Collapse, Typography } from 'antd'
+import { Card, Button, message, Spin, Row, Col, Space, Breadcrumb, Switch, Input, InputNumber, Collapse, Typography } from 'antd'
 import { SaveOutlined, SettingOutlined, CommentOutlined } from '@ant-design/icons'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import PromptEditor from '../components/PromptEditor'
@@ -54,6 +54,8 @@ const ChatbotOrchestration: React.FC = () => {
     hyde_prompt: undefined,
     query_expansion_enabled: false,
     query_expansion_prompt: undefined,
+    rerank_enabled: false,
+    rerank_top_k: 3,
   })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -264,6 +266,40 @@ const ChatbotOrchestration: React.FC = () => {
                     >
                       恢复默认
                     </Button>
+                  </div>
+                ),
+              },
+              {
+                key: 'rerank',
+                label: (
+                  <Space>
+                    <Switch
+                      size="small"
+                      checked={config.rerank_enabled}
+                      onChange={(checked) => setConfig({
+                        ...config,
+                        rerank_enabled: checked,
+                      })}
+                    />
+                    <span>重排序 (Rerank)</span>
+                  </Space>
+                ),
+                children: (
+                  <div>
+                    <Typography.Text type="secondary" className="block mb-2">
+                      使用 Cross-Encoder 模型对检索结果进行二次排序，提升检索精度。基于 BAAI/bge-reranker-base 模型。
+                    </Typography.Text>
+                    <Space align="center">
+                      <span>保留 Top-K 结果：</span>
+                      <InputNumber
+                        min={1}
+                        max={20}
+                        value={config.rerank_top_k || 3}
+                        onChange={(value) => setConfig({ ...config, rerank_top_k: value || 3 })}
+                        disabled={!config.rerank_enabled}
+                        style={{ width: 80 }}
+                      />
+                    </Space>
                   </div>
                 ),
               },

@@ -85,6 +85,9 @@ class KnowledgeRetrievalConfig(BaseModel):
     score_threshold: float = Field(0.5, ge=0.0, le=1.0)
     query_key: str = "query"
     output_key: str = "documents"
+    # Rerank 重排序
+    rerank_enabled: bool = Field(False, description="启用重排序，对检索结果进行二次排序提升精度")
+    rerank_top_k: int = Field(3, ge=1, le=20, description="重排序后保留的 Top-K 结果数")
 
 
 class ConditionBranch(BaseModel):

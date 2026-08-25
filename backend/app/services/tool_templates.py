@@ -372,6 +372,724 @@ TOOL_TEMPLATES: List[Dict[str, Any]] = [
         "endpoint": None,
         "auth_config": None,
     },
+
+    # ============ 搜索 (扩展) ============
+    {
+        "id": "serpapi_search",
+        "name": "SerpAPI Search",
+        "description": "Google/Bing 搜索结果 API，返回结构化 SERP 数据",
+        "category": "search",
+        "icon": "🔎",
+        "tool_type": "plugin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "搜索查询关键词"
+                },
+                "engine": {
+                    "type": "string",
+                    "enum": ["google", "bing", "baidu"],
+                    "description": "搜索引擎",
+                    "default": "google"
+                },
+                "num": {
+                    "type": "integer",
+                    "description": "返回结果数量",
+                    "default": 10
+                }
+            },
+            "required": ["query"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "organic_results": {"type": "array"},
+                "answer_box": {"type": "object"}
+            }
+        },
+        "endpoint": "https://serpapi.com/search",
+        "auth_config": {"api_key": ""},
+    },
+    {
+        "id": "google_search",
+        "name": "Google Custom Search",
+        "description": "Google 自定义搜索 API，适合精确网页检索",
+        "category": "search",
+        "icon": "🔍",
+        "tool_type": "plugin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "搜索查询"
+                },
+                "num": {
+                    "type": "integer",
+                    "description": "结果数量，最多 10",
+                    "default": 10
+                },
+                "language": {
+                    "type": "string",
+                    "description": "结果语言，如 lang_zh-CN",
+                    "default": "lang_zh-CN"
+                }
+            },
+            "required": ["query"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "items": {"type": "array"}
+            }
+        },
+        "endpoint": "https://www.googleapis.com/customsearch/v1",
+        "auth_config": {"api_key": "", "cx": ""},
+    },
+
+    # ============ 翻译 ============
+    {
+        "id": "google_translate",
+        "name": "Google Translate",
+        "description": "Google 翻译 API，支持 100+ 语言互译",
+        "category": "translate",
+        "icon": "🌐",
+        "tool_type": "plugin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "要翻译的文本"
+                },
+                "source": {
+                    "type": "string",
+                    "description": "源语言代码，如 zh、en、ja（可选，自动检测）"
+                },
+                "target": {
+                    "type": "string",
+                    "description": "目标语言代码，如 en、zh、ja",
+                    "default": "en"
+                }
+            },
+            "required": ["text", "target"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "translatedText": {"type": "string"},
+                "detectedSourceLanguage": {"type": "string"}
+            }
+        },
+        "endpoint": "https://translation.googleapis.com/language/translate/v2",
+        "auth_config": {"api_key": ""},
+    },
+    {
+        "id": "deepl_translate",
+        "name": "DeepL Translate",
+        "description": "DeepL 高质量翻译，尤其中英互译效果出色",
+        "category": "translate",
+        "icon": "🔤",
+        "tool_type": "plugin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "要翻译的文本"
+                },
+                "target_lang": {
+                    "type": "string",
+                    "description": "目标语言代码，如 EN、ZH、JA、DE、FR",
+                    "default": "EN"
+                },
+                "source_lang": {
+                    "type": "string",
+                    "description": "源语言代码（可选，自动检测）"
+                }
+            },
+            "required": ["text", "target_lang"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "translations": {"type": "array"}
+            }
+        },
+        "endpoint": "https://api-free.deepl.com/v2/translate",
+        "auth_config": {"api_key": ""},
+    },
+
+    # ============ 通知 ============
+    {
+        "id": "send_email",
+        "name": "Send Email (SMTP)",
+        "description": "通过 SMTP 发送电子邮件，支持 HTML 内容和附件",
+        "category": "notification",
+        "icon": "📧",
+        "tool_type": "plugin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "to": {
+                    "type": "string",
+                    "description": "收件人邮箱地址"
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "邮件主题"
+                },
+                "body": {
+                    "type": "string",
+                    "description": "邮件正文（支持 HTML）"
+                },
+                "cc": {
+                    "type": "string",
+                    "description": "抄送邮箱地址（可选）"
+                }
+            },
+            "required": ["to", "subject", "body"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "message_id": {"type": "string"}
+            }
+        },
+        "endpoint": None,
+        "auth_config": {"smtp_host": "", "smtp_port": "587", "username": "", "password": ""},
+    },
+    {
+        "id": "slack_webhook",
+        "name": "Slack Webhook",
+        "description": "通过 Slack Incoming Webhook 发送消息到频道",
+        "category": "notification",
+        "icon": "💬",
+        "tool_type": "plugin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "消息内容，支持 Markdown 格式"
+                },
+                "channel": {
+                    "type": "string",
+                    "description": "频道名称（可选，覆盖 Webhook 默认频道）"
+                },
+                "username": {
+                    "type": "string",
+                    "description": "机器人显示名称",
+                    "default": "Agent Bot"
+                }
+            },
+            "required": ["text"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"}
+            }
+        },
+        "endpoint": None,
+        "auth_config": {"webhook_url": ""},
+    },
+    {
+        "id": "dingtalk_webhook",
+        "name": "钉钉 Webhook",
+        "description": "通过钉钉自定义机器人发送群消息",
+        "category": "notification",
+        "icon": "🔔",
+        "tool_type": "plugin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "消息内容"
+                },
+                "title": {
+                    "type": "string",
+                    "description": "消息标题（Markdown 类型时必填）"
+                },
+                "msgtype": {
+                    "type": "string",
+                    "enum": ["text", "markdown"],
+                    "description": "消息类型",
+                    "default": "text"
+                }
+            },
+            "required": ["text"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "errcode": {"type": "integer"},
+                "errmsg": {"type": "string"}
+            }
+        },
+        "endpoint": None,
+        "auth_config": {"webhook_url": "", "secret": ""},
+    },
+
+    # ============ AI / 多媒体 ============
+    {
+        "id": "image_generation",
+        "name": "DALL·E Image Generation",
+        "description": "OpenAI DALL·E 文生图，根据文字描述生成图片",
+        "category": "ai",
+        "icon": "🎨",
+        "tool_type": "plugin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "图片描述，越详细效果越好"
+                },
+                "size": {
+                    "type": "string",
+                    "enum": ["256x256", "512x512", "1024x1024"],
+                    "description": "图片尺寸",
+                    "default": "1024x1024"
+                },
+                "n": {
+                    "type": "integer",
+                    "description": "生成图片数量",
+                    "default": 1
+                }
+            },
+            "required": ["prompt"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "images": {"type": "array", "items": {"type": "object", "properties": {"url": {"type": "string"}}}}
+            }
+        },
+        "endpoint": "https://api.openai.com/v1/images/generations",
+        "auth_config": {"api_key": ""},
+    },
+    {
+        "id": "speech_to_text",
+        "name": "Whisper Speech-to-Text",
+        "description": "OpenAI Whisper 语音转文字，支持多语言音频识别",
+        "category": "ai",
+        "icon": "🎤",
+        "tool_type": "plugin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "audio_url": {
+                    "type": "string",
+                    "description": "音频文件 URL 或路径"
+                },
+                "language": {
+                    "type": "string",
+                    "description": "语言代码，如 zh、en（可选，自动检测）"
+                },
+                "response_format": {
+                    "type": "string",
+                    "enum": ["json", "text", "srt", "verbose_json"],
+                    "description": "输出格式",
+                    "default": "json"
+                }
+            },
+            "required": ["audio_url"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "language": {"type": "string"},
+                "duration": {"type": "number"}
+            }
+        },
+        "endpoint": "https://api.openai.com/v1/audio/transcriptions",
+        "auth_config": {"api_key": ""},
+    },
+    {
+        "id": "text_to_speech",
+        "name": "Text-to-Speech",
+        "description": "OpenAI TTS 文字转语音，支持多种音色",
+        "category": "ai",
+        "icon": "🔊",
+        "tool_type": "plugin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "description": "要转换的文本"
+                },
+                "voice": {
+                    "type": "string",
+                    "enum": ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
+                    "description": "音色选择",
+                    "default": "alloy"
+                },
+                "speed": {
+                    "type": "number",
+                    "description": "语速，0.25-4.0",
+                    "default": 1.0
+                }
+            },
+            "required": ["input"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "audio_url": {"type": "string"},
+                "duration": {"type": "number"}
+            }
+        },
+        "endpoint": "https://api.openai.com/v1/audio/speech",
+        "auth_config": {"api_key": ""},
+    },
+
+    # ============ 数据处理 ============
+    {
+        "id": "json_processor",
+        "name": "JSON Processor",
+        "description": "JSON 数据处理工具，支持查询、过滤、转换",
+        "category": "data",
+        "icon": "📋",
+        "tool_type": "builtin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "string",
+                    "description": "JSON 字符串或 URL"
+                },
+                "jq_query": {
+                    "type": "string",
+                    "description": "jq 风格查询表达式，如 .items[0].name"
+                },
+                "operation": {
+                    "type": "string",
+                    "enum": ["query", "flatten", "merge", "validate"],
+                    "description": "操作类型",
+                    "default": "query"
+                }
+            },
+            "required": ["data"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "result": {},
+                "valid": {"type": "boolean"}
+            }
+        },
+        "endpoint": None,
+        "auth_config": None,
+    },
+    {
+        "id": "xml_parser",
+        "name": "XML Parser",
+        "description": "XML 数据解析，支持 XPath 查询和 XML→JSON 转换",
+        "category": "data",
+        "icon": "📑",
+        "tool_type": "builtin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "xml": {
+                    "type": "string",
+                    "description": "XML 字符串或 URL"
+                },
+                "xpath": {
+                    "type": "string",
+                    "description": "XPath 查询表达式（可选）"
+                },
+                "output_format": {
+                    "type": "string",
+                    "enum": ["json", "text"],
+                    "description": "输出格式",
+                    "default": "json"
+                }
+            },
+            "required": ["xml"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "result": {},
+                "root_tag": {"type": "string"}
+            }
+        },
+        "endpoint": None,
+        "auth_config": None,
+    },
+    {
+        "id": "base64_codec",
+        "name": "Base64 Encoder/Decoder",
+        "description": "Base64 编码解码工具",
+        "category": "data",
+        "icon": "🔄",
+        "tool_type": "builtin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "description": "要编码或解码的内容"
+                },
+                "operation": {
+                    "type": "string",
+                    "enum": ["encode", "decode"],
+                    "description": "操作类型：encode(编码) 或 decode(解码)",
+                    "default": "encode"
+                }
+            },
+            "required": ["input"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "result": {"type": "string"}
+            }
+        },
+        "endpoint": None,
+        "auth_config": None,
+    },
+
+    # ============ 实用工具 ============
+    {
+        "id": "calculator",
+        "name": "Calculator",
+        "description": "数学计算器，支持复杂表达式、函数、单位转换",
+        "category": "utility",
+        "icon": "🧮",
+        "tool_type": "builtin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "expression": {
+                    "type": "string",
+                    "description": "数学表达式，如 2+3*4、sqrt(16)、sin(pi/2)"
+                }
+            },
+            "required": ["expression"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "result": {"type": "number"},
+                "expression": {"type": "string"}
+            }
+        },
+        "endpoint": None,
+        "auth_config": None,
+    },
+    {
+        "id": "uuid_generator",
+        "name": "UUID Generator",
+        "description": "生成 UUID/GUID，支持 v4 随机和 v5 命名空间",
+        "category": "utility",
+        "icon": "🆔",
+        "tool_type": "builtin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "version": {
+                    "type": "integer",
+                    "enum": [4, 5],
+                    "description": "UUID 版本",
+                    "default": 4
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "生成数量",
+                    "default": 1
+                },
+                "namespace": {
+                    "type": "string",
+                    "description": "v5 命名空间（可选）"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "v5 名称（可选）"
+                }
+            }
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "uuids": {"type": "array", "items": {"type": "string"}}
+            }
+        },
+        "endpoint": None,
+        "auth_config": None,
+    },
+    {
+        "id": "datetime_tool",
+        "name": "DateTime Tool",
+        "description": "日期时间工具，支持时区转换、格式化、计算",
+        "category": "utility",
+        "icon": "🕐",
+        "tool_type": "builtin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["now", "convert", "diff", "format", "parse"],
+                    "description": "操作类型"
+                },
+                "datetime_str": {
+                    "type": "string",
+                    "description": "日期时间字符串（convert/diff/format/parse 时必填）"
+                },
+                "from_tz": {
+                    "type": "string",
+                    "description": "源时区，如 Asia/Shanghai、UTC",
+                    "default": "UTC"
+                },
+                "to_tz": {
+                    "type": "string",
+                    "description": "目标时区",
+                    "default": "Asia/Shanghai"
+                },
+                "format": {
+                    "type": "string",
+                    "description": "日期格式，如 %Y-%m-%d %H:%M:%S"
+                }
+            },
+            "required": ["operation"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "result": {"type": "string"},
+                "timestamp": {"type": "number"}
+            }
+        },
+        "endpoint": None,
+        "auth_config": None,
+    },
+    {
+        "id": "hash_generator",
+        "name": "Hash Generator",
+        "description": "哈希/摘要生成工具，支持 MD5、SHA1、SHA256 等",
+        "category": "utility",
+        "icon": "🔐",
+        "tool_type": "builtin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "description": "要计算哈希的内容"
+                },
+                "algorithm": {
+                    "type": "string",
+                    "enum": ["md5", "sha1", "sha256", "sha512"],
+                    "description": "哈希算法",
+                    "default": "sha256"
+                },
+                "encoding": {
+                    "type": "string",
+                    "enum": ["hex", "base64"],
+                    "description": "输出编码",
+                    "default": "hex"
+                }
+            },
+            "required": ["input"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "hash": {"type": "string"},
+                "algorithm": {"type": "string"}
+            }
+        },
+        "endpoint": None,
+        "auth_config": None,
+    },
+
+    # ============ 网页 (扩展) ============
+    {
+        "id": "url_shortener",
+        "name": "URL Shortener",
+        "description": "短链接生成服务，支持多个提供商",
+        "category": "web",
+        "icon": "🔗",
+        "tool_type": "plugin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "要缩短的长 URL"
+                },
+                "provider": {
+                    "type": "string",
+                    "enum": ["tinyurl", "bitly", "rebrandly"],
+                    "description": "短链接服务商",
+                    "default": "tinyurl"
+                }
+            },
+            "required": ["url"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "short_url": {"type": "string"},
+                "original_url": {"type": "string"}
+            }
+        },
+        "endpoint": None,
+        "auth_config": {"api_key": ""},
+    },
+    {
+        "id": "screenshot_tool",
+        "name": "Website Screenshot",
+        "description": "网页截图工具，生成网页的 PNG/PDF 快照",
+        "category": "web",
+        "icon": "📸",
+        "tool_type": "plugin",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "要截图的网页 URL"
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["png", "jpeg", "pdf"],
+                    "description": "输出格式",
+                    "default": "png"
+                },
+                "full_page": {
+                    "type": "boolean",
+                    "description": "是否截取完整页面",
+                    "default": False
+                },
+                "width": {
+                    "type": "integer",
+                    "description": "视口宽度",
+                    "default": 1280
+                }
+            },
+            "required": ["url"]
+        },
+        "return_schema": {
+            "type": "object",
+            "properties": {
+                "image_url": {"type": "string"},
+                "width": {"type": "integer"},
+                "height": {"type": "integer"}
+            }
+        },
+        "endpoint": None,
+        "auth_config": {"api_key": ""},
+    },
 ]
 
 # 工具分类
@@ -380,9 +1098,14 @@ TOOL_CATEGORIES = [
     {"id": "search", "name": "搜索", "icon": "🔍"},
     {"id": "weather", "name": "天气", "icon": "🌤️"},
     {"id": "web", "name": "网页", "icon": "🌐"},
+    {"id": "translate", "name": "翻译", "icon": "🌐"},
+    {"id": "notification", "name": "通知", "icon": "🔔"},
+    {"id": "ai", "name": "AI", "icon": "🤖"},
+    {"id": "data", "name": "数据", "icon": "📊"},
     {"id": "file", "name": "文件", "icon": "📄"},
     {"id": "database", "name": "数据库", "icon": "🗃️"},
     {"id": "code", "name": "代码", "icon": "🐍"},
+    {"id": "utility", "name": "实用工具", "icon": "🧮"},
 ]
 
 

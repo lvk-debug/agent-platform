@@ -3,7 +3,7 @@
 """
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -43,7 +43,7 @@ class ChatbotService:
             return None
 
         config_data = app.config or {}
-        logger.info(f"加载配置: app_id={app_id}, 知识库数量: {len(config_data.get('knowledge_bases', []))}")
+        logger.info(f"加载配置: app_id={app_id}, model_id={config_data.get('model_id')}, 知识库数量: {len(config_data.get('knowledge_bases', []))}")
         return ChatbotConfig(**config_data)
 
     def update_chatbot_config(
@@ -137,7 +137,7 @@ class ChatbotService:
         citations: List[Dict[str, Any]] = []
         if config.knowledge_bases:
             context_text, citations = await self._retrieve_knowledge(
-                config.knowledge_bases, search_query
+                config.knowledge_bases, search_query, config
             )
 
         # 3. 获取或创建会话
@@ -159,8 +159,11 @@ class ChatbotService:
             logger.info(f"开始调用 LLM, model_id={config.model_id}")
             if config.model_id:
                 from app.models.model import Model
-                model = self.db.query(Model).filter(Model.id == config.model_id).first()
-                logger.info(f"找到模型: {model}, 供应商: {model.provider if model else None}")
+                from sqlalchemy.orm import joinedload
+                model = self.db.query(Model).options(
+                    joinedload(Model.provider)
+                ).filter(Model.id == config.model_id).first()
+                logger.info(f"找到模型: {model}, provider_id={model.provider_id if model else None}, 供应商: {model.provider if model else None}")
                 if model and model.provider:
                     provider_config = model.provider
                     from app.services.llm import LLMService
@@ -184,11 +187,14 @@ class ChatbotService:
                     )
                     answer = response.get("content", "")
                 else:
-                    logger.warning(f"模型 {config.model_id} 或其供应商不存在")
+                    if model:
+                        logger.warning(f"模型 {config.model_id} 存在但供应商不存在, provider_id={model.provider_id}")
+                    else:
+                        logger.warning(f"模型 {config.model_id} 不存在")
                     answer = self._generate_demo_response(query, context_text)
             else:
                 # 没有配置模型，使用演示模式
-                logger.info("未配置模型，使用演示模式")
+                logger.info("未配置模型 (model_id 为空)，使用演示模式")
                 answer = self._generate_demo_response(query, context_text)
         except Exception as e:
             logger.error(f"LLM 调用失败: {e}", exc_info=True)
@@ -208,6 +214,134 @@ class ChatbotService:
                 "citations": citations if citations else None,
             },
         )
+
+    # ------------------------------------------------------------------
+    # 流式对话处理
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sse_event(event: str, data: Any) -> str:
+        """格式化 SSE 事件"""
+        return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    async def chat_stream(
+        self,
+        app_id: int,
+        request: ChatRequest,
+        user: User,
+    ) -> AsyncGenerator[str, None]:
+        """
+        流式处理聊天请求
+
+        逐步 yield SSE 事件:
+        - message: 文本片段
+        - done: 完成
+        - error: 错误
+        """
+        config = self.get_chatbot_config(app_id)
+        if not config:
+            yield self._sse_event("error", {"message": "应用配置不存在"})
+            return
+
+        # 1. 变量替换
+        query = request.query
+        if request.inputs:
+            query = self._replace_variables(query, request.inputs, config)
+
+        # 2. 检索前增强：Query 扩展 → HyDE
+        search_query = query
+        if config.knowledge_bases:
+            if config.query_expansion_enabled:
+                expanded = await self._expand_query(query, config)
+                if expanded:
+                    search_query = expanded
+            if config.hyde_enabled:
+                hyde_text = await self._generate_hyde(query, config)
+                if hyde_text:
+                    search_query = hyde_text
+
+        # 3. 知识库检索
+        context_text = ""
+        citations: List[Dict[str, Any]] = []
+        if config.knowledge_bases:
+            context_text, citations = await self._retrieve_knowledge(
+                config.knowledge_bases, search_query, config
+            )
+
+        # 4. 获取或创建会话
+        conversation_id = request.conversation_id
+        if not conversation_id:
+            conversation_id = self._create_conversation(app_id, user.id, query)
+
+        # 5. 保存用户消息
+        self._save_message(conversation_id, "user", query)
+
+        # 6. 构建消息列表
+        messages = self._build_messages(
+            config, query, context_text, conversation_id
+        )
+
+        # 7. 流式调用 LLM
+        answer = ""
+        try:
+            if config.model_id:
+                from app.models.model import Model
+                from sqlalchemy.orm import joinedload
+                model = self.db.query(Model).options(
+                    joinedload(Model.provider)
+                ).filter(Model.id == config.model_id).first()
+                logger.info(f"流式调用 - 找到模型: {model}, provider_id={model.provider_id if model else None}")
+                if model and model.provider:
+                    provider_config = model.provider
+                    llm_service = LLMService()
+                    await llm_service.register_provider(
+                        provider_type=provider_config.provider_type,
+                        api_key=provider_config.api_key,
+                        api_endpoint=provider_config.api_endpoint,
+                    )
+                    params = config.model_parameters
+
+                    async for chunk in llm_service.stream_chat(
+                        messages=messages,
+                        model=model.model_id,
+                        provider=provider_config.provider_type,
+                        temperature=params.temperature if params else 0.7,
+                        max_tokens=params.max_tokens if params else 2048,
+                        top_p=params.top_p if params else 1.0,
+                    ):
+                        if chunk is None:
+                            continue
+                        answer += chunk
+                        yield self._sse_event("message", {"content": chunk})
+                else:
+                    if model:
+                        logger.warning(f"流式调用 - 模型 {config.model_id} 存在但供应商不存在, provider_id={model.provider_id}")
+                    else:
+                        logger.warning(f"流式调用 - 模型 {config.model_id} 不存在")
+                    answer = self._generate_demo_response(query, context_text)
+                    yield self._sse_event("message", {"content": answer})
+            else:
+                logger.info("流式调用 - 未配置模型 (model_id 为空)，使用演示模式")
+                answer = self._generate_demo_response(query, context_text)
+                yield self._sse_event("message", {"content": answer})
+        except Exception as e:
+            logger.error(f"LLM 流式调用失败: {e}", exc_info=True)
+            answer = self._generate_demo_response(query, context_text)
+            yield self._sse_event("message", {"content": answer})
+
+        # 8. 保存助手回复
+        message_id = self._save_message(conversation_id, "assistant", answer)
+
+        # 9. 发送完成事件
+        yield self._sse_event("done", {
+            "answer": answer,
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "metadata": {
+                "model": config.model_name,
+                "citations": citations if citations else None,
+            },
+        })
 
     def _replace_variables(
         self,
@@ -317,14 +451,20 @@ class ChatbotService:
         self,
         kb_configs: List[KnowledgeBaseConfig],
         query: str,
+        config: Optional[ChatbotConfig] = None,
     ) -> tuple[str, List[Dict[str, Any]]]:
         """
         从知识库检索相关信息
 
+        Args:
+            kb_configs: 知识库配置列表
+            query: 检索查询
+            config: 聊天助手配置（用于获取重排序设置）
+
         Returns:
             (context_text, citations): 上下文文本 和 引用列表
         """
-        all_context = []
+        all_results = []
         all_citations = []
         knowledge_service = get_knowledge_service(self.db)
 
@@ -351,34 +491,60 @@ class ChatbotService:
 
                 logger.info(f"知识库 {kb_config.knowledge_base_id} 检索到 {len(results)} 条结果")
                 for result in results:
-                    all_context.append(
-                        f"[来源: {result.get('document_name', '未知')}]\n"
-                        f"{result['content']}"
-                    )
-
-                    # 收集引用信息
-                    if kb_config.show_citation:
-                        citation = {
-                            "knowledge_base_id": kb_config.knowledge_base_id,
-                            "knowledge_base_name": kb_config.name,
-                            "document_id": result.get("document_id"),
-                            "document_name": result.get("document_name", "未知"),
-                            "segment_id": result.get("segment_id"),
-                            "content": result["content"][:200],
-                            "score": round(result.get("score", 0), 4),
-                        }
-                        # 附加元数据（如页码、标题路径）
-                        metadata = result.get("metadata") or {}
-                        if metadata.get("page_number"):
-                            citation["page_number"] = metadata["page_number"]
-                        if metadata.get("header_path"):
-                            citation["header_path"] = metadata["header_path"]
-                        all_citations.append(citation)
+                    result["_kb_config"] = kb_config
+                    all_results.append(result)
             except Exception as e:
                 logger.warning(
                     f"知识库 {kb_config.knowledge_base_id} 检索失败: {e}",
                     exc_info=True
                 )
+
+        # 重排序（如果启用）
+        if config and config.rerank_enabled and all_results:
+            try:
+                from app.services.reranker import get_reranker_service
+                reranker = get_reranker_service()
+                rerank_top_k = config.rerank_top_k or 3
+                logger.info(f"启用重排序, 原始结果: {len(all_results)}, top_k: {rerank_top_k}")
+                all_results = await reranker.rerank(
+                    query=query,
+                    documents=all_results,
+                    top_k=rerank_top_k,
+                )
+                logger.info(f"重排序完成, 结果数: {len(all_results)}")
+            except Exception as e:
+                logger.warning(f"重排序失败，使用原始结果: {e}", exc_info=True)
+
+        # 构建上下文和引用
+        all_context = []
+        for result in all_results:
+            kb_config = result.pop("_kb_config", None)
+            all_context.append(
+                f"[来源: {result.get('document_name', '未知')}]\n"
+                f"{result['content']}"
+            )
+
+            # 收集引用信息
+            if kb_config and kb_config.show_citation:
+                citation = {
+                    "knowledge_base_id": kb_config.knowledge_base_id,
+                    "knowledge_base_name": kb_config.name,
+                    "document_id": result.get("document_id"),
+                    "document_name": result.get("document_name", "未知"),
+                    "segment_id": result.get("segment_id"),
+                    "content": result["content"][:200],
+                    "score": round(result.get("score", 0), 4),
+                }
+                # 附加重排序分数
+                if "rerank_score" in result:
+                    citation["rerank_score"] = round(result["rerank_score"], 4)
+                # 附加元数据（如页码、标题路径）
+                metadata = result.get("metadata") or {}
+                if metadata.get("page_number"):
+                    citation["page_number"] = metadata["page_number"]
+                if metadata.get("header_path"):
+                    citation["header_path"] = metadata["header_path"]
+                all_citations.append(citation)
 
         logger.info(f"知识库检索完成, 共 {len(all_context)} 条上下文, 引用: {len(all_citations)} 条")
         context_text = "\n\n---\n\n".join(all_context) if all_context else ""

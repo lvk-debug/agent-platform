@@ -14,6 +14,7 @@ import {
   CaretRightOutlined, CaretDownOutlined, HolderOutlined,
 } from '@ant-design/icons'
 import { WorkflowNode, NodeType, NodeData } from '../../services/workflow'
+import { toolsApi, ToolData } from '../../services/tools'
 
 const { TextArea } = Input
 const { Text } = Typography
@@ -35,6 +36,8 @@ const NodeConfigDrawer: React.FC<NodeConfigDrawerProps> = ({ node, open, onClose
     output: true,
     errorHandling: false,
   })
+  const [availableTools, setAvailableTools] = useState<ToolData[]>([])
+  const [toolsLoading, setToolsLoading] = useState(false)
 
   useEffect(() => {
     if (node) {
@@ -45,6 +48,23 @@ const NodeConfigDrawer: React.FC<NodeConfigDrawerProps> = ({ node, open, onClose
       })
     }
   }, [node, form])
+
+  // 加载工具列表（当打开工具节点配置时）
+  useEffect(() => {
+    if (open && node?.type === 'tool') {
+      setToolsLoading(true)
+      toolsApi.getTools().then((res) => {
+        setAvailableTools(res.data || [])
+      }).catch(() => {
+        setAvailableTools([])
+      }).finally(() => {
+        setToolsLoading(false)
+      })
+    }
+  }, [open, node?.type])
+
+  // 监听工具选择变化（用于动态显示参数）
+  const selectedToolId = Form.useWatch('tool_id', form)
 
   const handleSave = () => {
     if (!node) return
@@ -326,6 +346,13 @@ const NodeConfigDrawer: React.FC<NodeConfigDrawerProps> = ({ node, open, onClose
       </Form.Item>
       <Form.Item name="output_key" label="输出键名" initialValue="documents">
         <Input />
+      </Form.Item>
+      <Divider orientation="left" plain>重排序</Divider>
+      <Form.Item name="rerank_enabled" label="启用重排序" valuePropName="checked" initialValue={false}>
+        <Switch />
+      </Form.Item>
+      <Form.Item name="rerank_top_k" label="重排序 Top-K" initialValue={3}>
+        <InputNumber className="w-full" min={1} max={20} />
       </Form.Item>
     </>
   )
@@ -628,22 +655,28 @@ const NodeConfigDrawer: React.FC<NodeConfigDrawerProps> = ({ node, open, onClose
   }
 
   const renderToolConfig = () => {
-    // 默认输入参数
-    const defaultInputs = [
-      { name: 'city', type: 'String', required: false },
-      { name: 'gps', type: 'String', required: false },
-      { name: 'ip', type: 'String', required: false },
-      { name: 'startDate', type: 'String', required: false },
-      { name: 'endDate', type: 'String', required: false },
-      { name: 'hour', type: 'String', required: false },
-    ]
+    // 从选中的工具加载参数 schema 生成默认输入
+    const selectedTool = availableTools.find(t => t.id === selectedToolId)
+    const schemaProps = selectedTool?.parameters_schema?.properties || {}
+    const schemaRequired = selectedTool?.parameters_schema?.required || []
+
+    const defaultInputs = Object.entries(schemaProps).map(([name, prop]: [string, any]) => ({
+      name,
+      type: (prop.type === 'integer' || prop.type === 'number') ? 'Number' : 'String',
+      required: schemaRequired.includes(name),
+    }))
 
     // 默认输出参数
     const defaultOutputs = [
-      { name: 'message', type: 'string' },
-      { name: 'data', type: 'Array<Object>' },
-      { name: 'code', type: 'integer' },
+      { name: 'result', type: 'object' },
     ]
+
+    // 工具类型标签颜色
+    const typeColors: Record<string, string> = {
+      builtin: 'green',
+      plugin: 'blue',
+      mcp: 'purple',
+    }
 
     return (
       <>
@@ -658,31 +691,31 @@ const NodeConfigDrawer: React.FC<NodeConfigDrawerProps> = ({ node, open, onClose
           </div>
           <Form.Item name="tool_id" noStyle>
             <Select
-              placeholder="选择工具"
+              placeholder={toolsLoading ? "加载中..." : "选择工具"}
               className="w-full"
               showSearch
               optionFilterProp="label"
+              loading={toolsLoading}
+              notFoundContent={toolsLoading ? "加载中..." : "暂无可用工具，请先在工具管理中安装"}
             >
-              <Select.Option value={1} label="天气查询">
-                <div className="flex items-center gap-2">
-                  <span>🌤️</span>
-                  <span>天气查询</span>
-                </div>
-              </Select.Option>
-              <Select.Option value={2} label="Tavily Search">
-                <div className="flex items-center gap-2">
-                  <span>🔍</span>
-                  <span>Tavily Search</span>
-                </div>
-              </Select.Option>
-              <Select.Option value={3} label="Web Scraper">
-                <div className="flex items-center gap-2">
-                  <span>🌐</span>
-                  <span>Web Scraper</span>
-                </div>
-              </Select.Option>
+              {availableTools.map((tool) => (
+                <Select.Option key={tool.id} value={tool.id} label={tool.name}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span>{tool.icon || '🔧'}</span>
+                      <span>{tool.name}</span>
+                    </div>
+                    <Tag color={typeColors[tool.tool_type] || 'default'} style={{ marginRight: 0 }}>
+                      {tool.tool_type}
+                    </Tag>
+                  </div>
+                </Select.Option>
+              ))}
             </Select>
           </Form.Item>
+          {selectedTool?.description && (
+            <Text type="secondary" className="text-xs mt-1 block">{selectedTool.description}</Text>
+          )}
         </div>
 
         {/* 输入 Section */}

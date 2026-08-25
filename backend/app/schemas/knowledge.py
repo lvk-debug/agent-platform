@@ -101,6 +101,7 @@ class SearchRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=50)
     score_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
     search_mode: str = Field(default="rrf", pattern="^(vector|bm25|rrf)$")
+    enable_rerank: bool = Field(default=False, description="是否启用重排序（BAAI/bge-reranker-base）")
 
 
 class SearchResultItem(BaseModel):
@@ -115,6 +116,7 @@ class SearchResultItem(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
     vector_score: Optional[float] = None
     bm25_score: Optional[float] = None
+    rerank_score: Optional[float] = None
 
 
 class SearchResponse(BaseModel):
@@ -125,6 +127,7 @@ class SearchResponse(BaseModel):
     results: List[SearchResultItem]
     total: int
     search_mode: str
+    enable_rerank: bool = False
 
 
 # --- URL 爬取 ---

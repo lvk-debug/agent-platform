@@ -152,6 +152,8 @@ def _make_knowledge_node(node_id: str, config: Dict[str, Any], db: Session):
             score_threshold = config.get("score_threshold", 0.5)
             query_key = config.get("query_key", "query")
             output_key = config.get("output_key", "documents")
+            rerank_enabled = config.get("rerank_enabled", False)
+            rerank_top_k = config.get("rerank_top_k", 3)
 
             merged = _merge_outputs(state)
             query = str(merged.get(query_key, ""))
@@ -169,6 +171,21 @@ def _make_knowledge_node(node_id: str, config: Dict[str, Any], db: Session):
                 top_k=top_k,
                 score_threshold=score_threshold,
             )
+
+            # 重排序（如果启用）
+            if rerank_enabled and results:
+                try:
+                    from app.services.reranker import get_reranker_service
+                    reranker = get_reranker_service()
+                    logger.info(f"[Knowledge] node={node_id} 启用重排序, 原始结果: {len(results)}, top_k: {rerank_top_k}")
+                    results = await reranker.rerank(
+                        query=query,
+                        documents=results,
+                        top_k=rerank_top_k,
+                    )
+                    logger.info(f"[Knowledge] node={node_id} 重排序完成, 结果数: {len(results)}")
+                except Exception as e:
+                    logger.warning(f"[Knowledge] node={node_id} 重排序失败，使用原始结果: {e}", exc_info=True)
 
             return {
                 "node_outputs": {node_id: {output_key: results, "query": query}},
@@ -289,24 +306,24 @@ def _make_http_node(node_id: str, config: Dict[str, Any]):
             body = _replace_vars(body, merged)
 
         try:
-            async with httpx.AsyncClient() as client:
-                kwargs = {"headers": headers, "timeout": float(timeout)}
-                if method == "GET":
-                    resp = await client.get(url, **kwargs)
-                elif method == "POST":
-                    resp = await client.post(url, json=body, **kwargs)
-                elif method == "PUT":
-                    resp = await client.put(url, json=body, **kwargs)
-                elif method == "DELETE":
-                    resp = await client.delete(url, **kwargs)
-                else:
-                    raise ValueError(f"不支持的 HTTP 方法: {method}")
+            from app.services.llm import _http_client as http_client
+            kwargs = {"headers": headers, "timeout": float(timeout)}
+            if method == "GET":
+                resp = await http_client.get(url, **kwargs)
+            elif method == "POST":
+                resp = await http_client.post(url, json=body, **kwargs)
+            elif method == "PUT":
+                resp = await http_client.put(url, json=body, **kwargs)
+            elif method == "DELETE":
+                resp = await http_client.delete(url, **kwargs)
+            else:
+                raise ValueError(f"不支持的 HTTP 方法: {method}")
 
-                content_type = resp.headers.get("content-type", "")
-                if "application/json" in content_type:
-                    resp_body = resp.json()
-                else:
-                    resp_body = resp.text
+            content_type = resp.headers.get("content-type", "")
+            if "application/json" in content_type:
+                resp_body = resp.json()
+            else:
+                resp_body = resp.text
 
                 result = {
                     "status_code": resp.status_code,
@@ -325,17 +342,83 @@ def _make_http_node(node_id: str, config: Dict[str, Any]):
     return _run
 
 
-def _make_tool_node(node_id: str, config: Dict[str, Any]):
-    """工具执行节点（预留）"""
+def _make_tool_node(node_id: str, config: Dict[str, Any], db: Session):
+    """工具执行节点 — 通过 ToolExecutor 执行实际工具调用"""
     async def _run(state: WorkflowState) -> dict:
-        logger.info(f"[Tool] node={node_id} (stub)")
+        from app.models.tool import Tool
+        from app.services.tool_executor import get_tool_executor
+
         tool_id = config.get("tool_id")
         output_key = config.get("output_key", "result")
-        # TODO: 接入工具服务
-        return {
-            "node_outputs": {node_id: {output_key: "[工具节点暂未实现]"}},
-            "execution_log": [{"node_id": node_id, "type": "tool", "status": "stub", "ts": datetime.utcnow().isoformat()}],
-        }
+        parameters = config.get("parameters", {})
+        error_action = config.get("error_action", "retry")
+        retry_count = config.get("retry_count", 3)
+        timeout = config.get("timeout", 30)
+
+        logger.info(f"[Tool] node={node_id}, tool_id={tool_id}")
+
+        if not tool_id:
+            return {
+                "node_outputs": {node_id: {output_key: "[工具节点未配置 tool_id]"}},
+                "execution_log": [{"node_id": node_id, "type": "tool", "status": "skipped", "reason": "no tool_id", "ts": datetime.utcnow().isoformat()}],
+            }
+
+        # 加载工具
+        db_tool = db.query(Tool).filter(Tool.id == tool_id).first()
+        if not db_tool:
+            return {
+                "node_outputs": {node_id: {output_key: f"[工具不存在: id={tool_id}]"}},
+                "execution_log": [{"node_id": node_id, "type": "tool", "status": "error", "error": f"tool not found: {tool_id}", "ts": datetime.utcnow().isoformat()}],
+            }
+
+        # 参数变量替换
+        merged = _merge_outputs(state)
+        resolved_params = {}
+        for key, value in parameters.items():
+            if isinstance(value, str):
+                resolved_params[key] = _replace_vars(value, merged)
+            else:
+                resolved_params[key] = value
+
+        # 执行工具（支持重试）
+        executor = get_tool_executor()
+        last_error = None
+        attempts = retry_count if error_action == "retry" else 1
+
+        for attempt in range(attempts):
+            result = await executor.execute(db_tool, resolved_params, timeout=float(timeout))
+            if result["success"]:
+                return {
+                    "node_outputs": {node_id: {output_key: result["output"]}},
+                    "execution_log": [{
+                        "node_id": node_id, "type": "tool", "status": "done",
+                        "tool_name": db_tool.name, "duration_ms": result["duration_ms"],
+                        "ts": datetime.utcnow().isoformat(),
+                    }],
+                }
+            last_error = result["error"]
+            if attempt < attempts - 1:
+                logger.warning(f"[Tool] node={node_id} 重试 {attempt + 1}/{attempts}: {last_error}")
+
+        # 所有重试都失败
+        if error_action == "skip":
+            return {
+                "node_outputs": {node_id: {output_key: None}},
+                "execution_log": [{"node_id": node_id, "type": "tool", "status": "skipped", "error": last_error, "ts": datetime.utcnow().isoformat()}],
+            }
+        elif error_action == "fallback":
+            fallback_value = config.get("fallback_value", "")
+            return {
+                "node_outputs": {node_id: {output_key: fallback_value}},
+                "execution_log": [{"node_id": node_id, "type": "tool", "status": "fallback", "error": last_error, "ts": datetime.utcnow().isoformat()}],
+            }
+        else:
+            # stop 或默认：返回错误信息
+            return {
+                "node_outputs": {node_id: {output_key: f"[工具执行失败] {last_error}"}},
+                "execution_log": [{"node_id": node_id, "type": "tool", "status": "error", "error": last_error, "ts": datetime.utcnow().isoformat()}],
+            }
+
     return _run
 
 
@@ -619,7 +702,7 @@ class GraphBuilder:
         elif node_type == "http":
             return _make_http_node(node_id, config)
         elif node_type == "tool":
-            return _make_tool_node(node_id, config)
+            return _make_tool_node(node_id, config, self.db)
         elif node_type == "human_intervention":
             return _make_human_intervention_node(node_id, config)
         elif node_type == "question_classifier":

@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
-import { Card, Input, Button, List, Tag, Typography, Empty, Spin, Space, Segmented } from 'antd'
-import { SearchOutlined, FileTextOutlined } from '@ant-design/icons'
+import { Card, Input, Button, List, Tag, Typography, Empty, Spin, Space, Segmented, Switch, Tooltip } from 'antd'
+import { SearchOutlined, FileTextOutlined, SortAscendingOutlined } from '@ant-design/icons'
 import { knowledgeApi, SearchResultItem, SearchMode } from '../services/knowledge'
 
 const { Text, Paragraph } = Typography
@@ -21,6 +21,7 @@ const SearchTestPanel: React.FC<SearchTestPanelProps> = ({ kbId }) => {
   const [loading, setLoading] = useState(false)
   const [searched, setSearched] = useState(false)
   const [searchMode, setSearchMode] = useState<SearchMode>('rrf')
+  const [enableRerank, setEnableRerank] = useState(false)
 
   const handleSearch = async (value: string) => {
     if (!value.trim()) return
@@ -28,7 +29,7 @@ const SearchTestPanel: React.FC<SearchTestPanelProps> = ({ kbId }) => {
     setLoading(true)
     setSearched(true)
     try {
-      const response = await knowledgeApi.searchKnowledgeBase(kbId, value, 5, 0, searchMode)
+      const response = await knowledgeApi.searchKnowledgeBase(kbId, value, 5, 0, searchMode, enableRerank)
       setResults(response.data.results)
     } catch {
       setResults([])
@@ -50,6 +51,15 @@ const SearchTestPanel: React.FC<SearchTestPanelProps> = ({ kbId }) => {
         score: {item.score.toFixed(4)}
       </Tag>,
     ]
+
+    // 重排序分数
+    if (enableRerank && item.rerank_score != null) {
+      tags.push(
+        <Tag key="rerank" color="gold">
+          重排: {item.rerank_score.toFixed(4)}
+        </Tag>
+      )
+    }
 
     // RRF 模式下展示子分数
     if (searchMode === 'rrf') {
@@ -85,6 +95,22 @@ const SearchTestPanel: React.FC<SearchTestPanelProps> = ({ kbId }) => {
           onChange={(val) => setSearchMode(val as SearchMode)}
           block
         />
+
+        <div className="flex items-center justify-between">
+          <Tooltip title="使用 BAAI/bge-reranker-base 模型对检索结果进行二次排序，提升精度（首次加载较慢）">
+            <Space>
+              <SortAscendingOutlined />
+              <span>重排序</span>
+              <Switch
+                size="small"
+                checked={enableRerank}
+                onChange={setEnableRerank}
+                checkedChildren="开"
+                unCheckedChildren="关"
+              />
+            </Space>
+          </Tooltip>
+        </div>
 
         <Input.Search
           placeholder="输入检索内容，测试知识库检索效果"

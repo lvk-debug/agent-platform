@@ -26,6 +26,10 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # 关闭时释放 LLM HTTP 连接池
+    from app.services.llm import close_http_client
+    await close_http_client()
+
 
 # 创建FastAPI应用
 app = FastAPI(

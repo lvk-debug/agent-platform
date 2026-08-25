@@ -4,6 +4,7 @@
 from typing import Any, List
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -108,6 +109,49 @@ async def chat(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"聊天处理失败: {str(e)}")
+
+
+@router.post("/{app_id}/chat/stream")
+async def chat_stream(
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    app_id: int,
+    request: ChatRequest,
+) -> Any:
+    """
+    发送聊天消息（流式 SSE）
+
+    返回 Server-Sent Events 流:
+    - event: message  - 文本片段
+    - event: done     - 完成
+    - event: error    - 错误
+    """
+    from app.models.app import App
+
+    # 验证应用存在且属于当前用户
+    app = db.query(App).filter(
+        App.id == app_id,
+        App.owner_id == current_user.id,
+    ).first()
+    if not app:
+        raise HTTPException(status_code=404, detail="应用不存在")
+
+    service = get_chatbot_service(db)
+
+    return StreamingResponse(
+        service.chat_stream(
+            app_id=app_id,
+            request=request,
+            user=current_user,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/{app_id}/conversations", response_model=List[ConversationResponse])

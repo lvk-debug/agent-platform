@@ -114,6 +114,9 @@ export const agentApi = {
     const decoder = new TextDecoder();
     let buffer = '';
 
+    let eventType = '';
+    let eventData = '';
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -123,9 +126,6 @@ export const agentApi = {
       // 解析 SSE 事件
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';  // 保留未完成的行
-
-      let eventType = '';
-      let eventData = '';
 
       for (const line of lines) {
         if (line.startsWith('event: ')) {
