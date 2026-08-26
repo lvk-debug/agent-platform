@@ -13,6 +13,7 @@ import {
   message,
   Divider,
   Steps,
+  Collapse,
 } from 'antd'
 import {
   ApiOutlined,
@@ -24,12 +25,15 @@ import {
   ArrowLeftOutlined,
   CheckCircleFilled,
   LinkOutlined,
+  SendOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons'
 import { appsApi, AppData } from '../services/apps'
 import { publishApi, PublishConfig, PublishChannel } from '../services/publish'
 
 const { Title, Text, Paragraph } = Typography
 const { TabPane } = Tabs
+const { TextArea } = Input
 
 // 渠道图标映射
 const channelIcons: Record<PublishChannel, React.ReactNode> = {
@@ -57,7 +61,17 @@ const PublishManagement: React.FC = () => {
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<PublishChannel>('api')
   const [toggling, setToggling] = useState<Record<string, boolean>>({})
-  const { message: msg } = message
+
+  // API 测试状态
+  const [testMessage, setTestMessage] = useState('')
+  const [testLoading, setTestLoading] = useState(false)
+  const [testResult, setTestResult] = useState<string>('')
+  const [testError, setTestError] = useState<string>('')
+
+  // API Endpoint 编辑状态
+  const [editingEndpoint, setEditingEndpoint] = useState<string>('')
+  const [isEditingEndpoint, setIsEditingEndpoint] = useState(false)
+  const [savingEndpoint, setSavingEndpoint] = useState(false)
 
   // 加载应用信息
   const fetchApp = useCallback(async () => {
@@ -66,9 +80,9 @@ const PublishManagement: React.FC = () => {
       const response = await appsApi.getApp(Number(appId))
       setApp(response.data)
     } catch (error) {
-      msg.error('获取应用信息失败')
+      message.error('获取应用信息失败')
     }
-  }, [appId, msg])
+  }, [appId])
 
   // 加载发布配置
   const fetchConfigs = useCallback(async () => {
@@ -78,11 +92,11 @@ const PublishManagement: React.FC = () => {
       const response = await publishApi.getAll(Number(appId))
       setConfigs(response.data.configs)
     } catch (error) {
-      msg.error('获取发布配置失败')
+      message.error('获取发布配置失败')
     } finally {
       setLoading(false)
     }
-  }, [appId, msg])
+  }, [appId])
 
   useEffect(() => {
     fetchApp()
@@ -107,9 +121,9 @@ const PublishManagement: React.FC = () => {
       setConfigs((prev) =>
         prev.map((c) => (c.channel === channel ? response.data : c))
       )
-      msg.success(enabled ? '已启用' : '已禁用')
+      message.success(enabled ? '已启用' : '已禁用')
     } catch (error) {
-      msg.error('操作失败')
+      message.error('操作失败')
     } finally {
       setToggling((prev) => ({ ...prev, [channel]: false }))
     }
@@ -118,10 +132,85 @@ const PublishManagement: React.FC = () => {
   // 复制文本到剪贴板
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text).then(() => {
-      msg.success('已复制到剪贴板')
+      message.success('已复制到剪贴板')
     }).catch(() => {
-      msg.error('复制失败')
+      message.error('复制失败')
     })
+  }
+
+  // 保存 API Endpoint
+  const handleSaveEndpoint = async () => {
+    if (!editingEndpoint.trim()) {
+      message.warning('Endpoint 不能为空')
+      return
+    }
+
+    setSavingEndpoint(true)
+    try {
+      const config = getConfig('api')
+      const existingConfig = config?.config || {}
+      const response = await publishApi.update(Number(appId), 'api', {
+        config: {
+          ...existingConfig,
+          api_endpoint: editingEndpoint,
+        },
+      })
+      setConfigs((prev) =>
+        prev.map((c) => (c.channel === 'api' ? response.data : c))
+      )
+      setIsEditingEndpoint(false)
+      message.success('Endpoint 已保存')
+    } catch (error) {
+      message.error('保存失败')
+    } finally {
+      setSavingEndpoint(false)
+    }
+  }
+
+  // 测试 API 调用
+  const handleTestApi = async () => {
+    if (!testMessage.trim()) {
+      message.warning('请输入测试消息')
+      return
+    }
+
+    const config = getConfig('api')
+    if (!config?.api_key || !config?.api_endpoint) {
+      message.error('API 配置不完整')
+      return
+    }
+
+    setTestLoading(true)
+    setTestResult('')
+    setTestError('')
+
+    try {
+      const response = await fetch(config.api_endpoint, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${config.api_key}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query: testMessage,
+          response_mode: 'blocking',
+        }),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || `HTTP ${response.status}`)
+      }
+
+      const data = await response.json()
+      setTestResult(JSON.stringify(data, null, 2))
+      message.success('API 调用成功')
+    } catch (error: any) {
+      setTestError(error.message || 'API 调用失败')
+      message.error('API 调用失败')
+    } finally {
+      setTestLoading(false)
+    }
   }
 
   // 渲染 API 渠道配置
@@ -160,14 +249,45 @@ const PublishManagement: React.FC = () => {
               <div>
                 <Text type="secondary">API Endpoint</Text>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Input
-                    value={config.api_endpoint || '未生成'}
-                    readOnly
-                    style={{ fontFamily: 'monospace' }}
-                  />
-                  <Button icon={<CopyOutlined />} onClick={() => handleCopy(config.api_endpoint || '')}>
-                    复制
-                  </Button>
+                  {isEditingEndpoint ? (
+                    <>
+                      <Input
+                        value={editingEndpoint}
+                        onChange={(e) => setEditingEndpoint(e.target.value)}
+                        style={{ fontFamily: 'monospace' }}
+                        onPressEnter={handleSaveEndpoint}
+                      />
+                      <Button
+                        type="primary"
+                        onClick={handleSaveEndpoint}
+                        loading={savingEndpoint}
+                      >
+                        保存
+                      </Button>
+                      <Button onClick={() => setIsEditingEndpoint(false)}>
+                        取消
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Input
+                        value={config.api_endpoint || '未生成'}
+                        readOnly
+                        style={{ fontFamily: 'monospace' }}
+                      />
+                      <Button
+                        onClick={() => {
+                          setEditingEndpoint(config.api_endpoint || '')
+                          setIsEditingEndpoint(true)
+                        }}
+                      >
+                        编辑
+                      </Button>
+                      <Button icon={<CopyOutlined />} onClick={() => handleCopy(config.api_endpoint || '')}>
+                        复制
+                      </Button>
+                    </>
+                  )}
                 </div>
               </div>
             </Space>
@@ -180,9 +300,86 @@ const PublishManagement: React.FC = () => {
 {`curl -X POST ${config.api_endpoint || 'https://api.example.com/v1/apps/1/chat'} \\
   -H "Authorization: Bearer ${config.api_key || '<your-api-key>'}" \\
   -H "Content-Type: application/json" \\
-  -d '{"message": "你好"}'`}
+  -d '{"query": "你好", "response_mode": "blocking"}'`}
               </pre>
             </Card>
+
+            <Divider />
+
+            <Collapse
+              items={[
+                {
+                  key: 'test',
+                  label: (
+                    <Space>
+                      <ThunderboltOutlined />
+                      <Text strong>在线测试</Text>
+                    </Space>
+                  ),
+                  children: (
+                    <div>
+                      <Space.Compact style={{ width: '100%', marginBottom: 12 }}>
+                        <TextArea
+                          placeholder="输入测试消息..."
+                          value={testMessage}
+                          onChange={(e) => setTestMessage(e.target.value)}
+                          autoSize={{ minRows: 2, maxRows: 4 }}
+                          onPressEnter={(e) => {
+                            if (!e.shiftKey) {
+                              e.preventDefault()
+                              handleTestApi()
+                            }
+                          }}
+                        />
+                      </Space.Compact>
+                      <Button
+                        type="primary"
+                        icon={<SendOutlined />}
+                        loading={testLoading}
+                        onClick={handleTestApi}
+                        block
+                      >
+                        发送测试请求
+                      </Button>
+
+                      {testResult && (
+                        <div style={{ marginTop: 12 }}>
+                          <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
+                            响应结果：
+                          </Text>
+                          <Card
+                            size="small"
+                            style={{ background: '#f6f8fa' }}
+                            bodyStyle={{ padding: 12 }}
+                          >
+                            <pre style={{ margin: 0, fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                              {testResult}
+                            </pre>
+                          </Card>
+                        </div>
+                      )}
+
+                      {testError && (
+                        <div style={{ marginTop: 12 }}>
+                          <Text type="danger" style={{ display: 'block', marginBottom: 8 }}>
+                            错误信息：
+                          </Text>
+                          <Card
+                            size="small"
+                            style={{ background: '#fff2f0', borderColor: '#ffccc7' }}
+                            bodyStyle={{ padding: 12 }}
+                          >
+                            <pre style={{ margin: 0, fontSize: 12, color: '#cf1322', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                              {testError}
+                            </pre>
+                          </Card>
+                        </div>
+                      )}
+                    </div>
+                  ),
+                },
+              ]}
+            />
           </Card>
         )}
 

@@ -9,10 +9,7 @@ import {
   Spin,
   message,
   Popconfirm,
-  Drawer,
-  Timeline,
   Collapse,
-  Badge,
   Tooltip,
   List,
 } from 'antd';
@@ -26,21 +23,25 @@ import {
   PlusOutlined,
   MessageOutlined,
   CheckCircleOutlined,
+  CloseCircleOutlined,
   LoadingOutlined,
   BookOutlined,
-  BugOutlined,
-  ClockCircleOutlined,
+  BulbOutlined,
+  ToolOutlined,
   PaperClipOutlined,
 } from '@ant-design/icons';
 import { chatbotApi, ChatRequest } from '../services/chatbot';
 import { agentApi, AgentChatRequest } from '../services/agent';
 import { appsApi, AppData } from '../services/apps';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 // 工具调用记录类型
 interface ToolCallRecord {
   id: string;
   messageId: string;
   tool: string;
+  tool_call_id?: string;
   input: string;
   output: string;
   thought?: string;
@@ -49,12 +50,20 @@ interface ToolCallRecord {
   timestamp: Date;
 }
 
+// 消息内容块类型
+interface MessageBlock {
+  type: 'thinking' | 'tool' | 'text';
+  content?: string;
+  toolCalls?: ToolCallRecord[];
+}
+
 // 扩展消息类型
 interface ExtendedMessage {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: Date;
+  isStreaming?: boolean;
   citations?: Array<{
     content: string;
     knowledge_base: string;
@@ -68,6 +77,7 @@ interface ExtendedMessage {
     snippet?: string;
   }>;
   metadata?: Record<string, any>;
+  blocks?: MessageBlock[];
 }
 
 interface SessionData {
@@ -129,9 +139,6 @@ const AppRunner: React.FC = () => {
   const [inputValue, setInputValue] = useState('');
   const [sending, setSending] = useState(false);
 
-  // Agent 运行日志抽屉
-  const [logDrawerOpen, setLogDrawerOpen] = useState(false);
-  const [selectedMessageLogs, setSelectedMessageLogs] = useState<ToolCallRecord[]>([]);
 
   // 会话分组
   const sessionGroups = useMemo(() => groupSessions(sessions), [sessions]);
@@ -228,16 +235,6 @@ const AppRunner: React.FC = () => {
   }, [currentSession?.messages]);
 
   // 查看消息的运行日志
-  const handleViewLogs = (msg: ExtendedMessage) => {
-    const logs = msg.tool_calls || [];
-    setSelectedMessageLogs(logs);
-    setLogDrawerOpen(true);
-    if (msg.metadata) {
-      console.log('Agent 响应元数据:', msg.metadata);
-    }
-    console.log('Agent 工具调用记录:', logs);
-  };
-
   // 发送消息
   const handleSend = async () => {
     if (!inputValue.trim() || !currentSession || !app) return;
@@ -276,6 +273,8 @@ const AppRunner: React.FC = () => {
           timestamp: new Date(),
           tool_calls: [],
           metadata: {},
+          blocks: [],
+          isStreaming: true,
         };
 
         const streamingMessages = [...updatedMessages, assistantMessage];
@@ -284,15 +283,36 @@ const AppRunner: React.FC = () => {
         let finalConversationId = currentSession.conversation_id;
         let finalMetadata: Record<string, any> = {};
 
+        // blocks 的本地副本，用于流式更新
+        let streamingBlocks: MessageBlock[] = [{
+          type: 'thinking',
+          content: ''
+        }];
+
         try {
           for await (const event of agentApi.chatStream(Number(appId), request)) {
             switch (event.event) {
               case 'message': {
-                assistantMessage.content += event.data.content;
+                const textContent = event.data.content;
+                // 移除思考中占位块（LLM 开始输出时占位块已完成使命）
+                const thinkBlock = streamingBlocks[0];
+                if (thinkBlock?.type === 'thinking') {
+                  streamingBlocks = streamingBlocks.slice(1);
+                }
+                // 追加到最后一个 text block，或创建新 block（必须创建新对象引用）
+                const updatedLastBlock = streamingBlocks[streamingBlocks.length - 1];
+                if (updatedLastBlock && updatedLastBlock.type === 'text') {
+                  const updatedTextBlock = { ...updatedLastBlock, content: (updatedLastBlock.content || '') + textContent };
+                  streamingBlocks = [...streamingBlocks.slice(0, -1), updatedTextBlock];
+                } else {
+                  streamingBlocks = [...streamingBlocks, { type: 'text', content: textContent }];
+                }
+                assistantMessage.content += textContent;
+                assistantMessage.blocks = [...streamingBlocks];
                 setCurrentSession(prev => ({
                   ...prev!,
                   messages: prev!.messages.map(m =>
-                    m.id === assistantMsgId ? { ...m, content: assistantMessage.content } : m
+                    m.id === assistantMsgId ? { ...m, content: assistantMessage.content, blocks: [...streamingBlocks] } : m
                   ),
                 }));
                 break;
@@ -302,75 +322,144 @@ const AppRunner: React.FC = () => {
                   id: `${assistantMsgId}_tool_${Date.now()}`,
                   messageId: assistantMsgId,
                   tool: event.data.tool,
+                  tool_call_id: event.data.tool_call_id,
                   input: event.data.input,
                   output: '',
                   status: 'running',
                   timestamp: new Date(),
                 };
                 assistantMessage.tool_calls = [...(assistantMessage.tool_calls || []), newToolCall];
+                // 追加到最后一个 tool block，或创建新 block（必须创建新对象引用，触发 React 重渲染）
+                const lastToolBlock = streamingBlocks[streamingBlocks.length - 1];
+                if (lastToolBlock && lastToolBlock.type === 'tool') {
+                  const updatedBlock = { ...lastToolBlock, toolCalls: [...(lastToolBlock.toolCalls || []), newToolCall] };
+                  streamingBlocks = [...streamingBlocks.slice(0, -1), updatedBlock];
+                } else {
+                  streamingBlocks = [...streamingBlocks, { type: 'tool', toolCalls: [newToolCall] }];
+                }
+                assistantMessage.blocks = [...streamingBlocks];
                 setCurrentSession(prev => ({
                   ...prev!,
                   messages: prev!.messages.map(m =>
                     m.id === assistantMsgId
-                      ? { ...m, tool_calls: [...(m.tool_calls || []), newToolCall] }
+                      ? { ...m, tool_calls: [...(m.tool_calls || []), newToolCall], blocks: [...streamingBlocks] }
                       : m
                   ),
                 }));
                 break;
               }
               case 'tool_end': {
+                const doneToolCallId = event.data.tool_call_id;
+                // 用 tool_call_id 精确匹配，回退到 name + running 匹配
+                const matchTool = (tc: ToolCallRecord) => {
+                  if (doneToolCallId && tc.tool_call_id) return tc.tool_call_id === doneToolCallId;
+                  return tc.tool === event.data.tool && tc.status === 'running';
+                };
+                // 同步更新 streamingBlocks（后续事件依赖此变量的正确引用）
+                streamingBlocks = streamingBlocks.map(b => {
+                  if (b.type !== 'tool') return b;
+                  const updatedToolCalls = (b.toolCalls || []).map(tc =>
+                    matchTool(tc) ? { ...tc, output: event.data.output, status: event.data.status || 'success' as const } : tc
+                  );
+                  return { ...b, toolCalls: updatedToolCalls };
+                });
                 setCurrentSession(prev => ({
                   ...prev!,
                   messages: prev!.messages.map(m => {
                     if (m.id !== assistantMsgId) return m;
                     const toolCalls = (m.tool_calls || []).map(tc =>
-                      tc.tool === event.data.tool && tc.status === 'running'
-                        ? { ...tc, output: event.data.output, status: event.data.status || 'success' as const }
-                        : tc
+                      matchTool(tc) ? { ...tc, output: event.data.output, status: event.data.status || 'success' as const } : tc
                     );
-                    return { ...m, tool_calls: toolCalls };
+                    return { ...m, tool_calls: toolCalls, blocks: [...streamingBlocks] };
                   }),
+                }));
+                setCurrentSession(prev => ({
+                  ...prev!,
+                  messages: prev!.messages.map(m =>
+                    m.id === assistantMsgId ? { ...m, blocks: [...streamingBlocks] } : m
+                  ),
                 }));
                 break;
               }
-              case 'thinking':
+              case 'thinking': {
+                const thinkingContent = event.data.content;
+                // 追加到最后一个 thinking block，或创建新 block
+                const lastThinkBlock = streamingBlocks[streamingBlocks.length - 1];
+                if (lastThinkBlock && lastThinkBlock.type === 'thinking') {
+                  // 如果是占位块，替换为真实内容
+                  const updatedThinkBlock = { ...lastThinkBlock, content: (lastThinkBlock.content || '') + thinkingContent, isPlaceholder: false };
+                  streamingBlocks = [...streamingBlocks.slice(0, -1), updatedThinkBlock];
+                } else {
+                  streamingBlocks = [...streamingBlocks, { type: 'thinking', content: thinkingContent }];
+                }
+                assistantMessage.blocks = [...streamingBlocks];
+                setCurrentSession(prev => ({
+                  ...prev!,
+                  messages: prev!.messages.map(m =>
+                    m.id === assistantMsgId ? { ...m, blocks: [...streamingBlocks] } : m
+                  ),
+                }));
                 break;
+              }
               case 'done': {
                 finalConversationId = event.data.conversation_id;
                 finalMetadata = event.data.metadata;
                 setCurrentSession(prev => {
                   if (!prev) return prev;
-                  const finalMessages = prev.messages.map(m =>
-                    m.id === assistantMsgId
-                      ? {
-                          ...m,
-                          tool_calls: event.data.intermediate_steps?.map((step: any, index: number) => ({
-                            id: `${assistantMsgId}_step_${index}`,
-                            messageId: assistantMsgId,
-                            tool: step.tool,
-                            input: step.input,
-                            output: step.output,
-                            thought: step.thought,
-                            status: step.status || 'success',
-                            duration: step.duration,
-                            timestamp: new Date(),
-                          })) || m.tool_calls,
-                          metadata: event.data.metadata,
-                        }
-                      : m
-                  );
+                  const finalMessages = prev.messages.map(m => {
+                    if (m.id !== assistantMsgId) return m;
+                    // 构建 tool_call_id → step 映射，用于同步 output
+                    const stepMap = new Map<string, any>();
+                    (event.data.intermediate_steps || []).forEach((step: any) => {
+                      if (step.tool_call_id) stepMap.set(step.tool_call_id, step);
+                    });
+                    // 保留已有的 tool_calls（含 tool_call_id），仅同步 output
+                    const finalToolCalls = (m.tool_calls || []).map(tc => {
+                      const step = tc.tool_call_id ? stepMap.get(tc.tool_call_id) : undefined;
+                      if (step) {
+                        return { ...tc, output: step.output || tc.output, status: step.status || 'success' as const };
+                      }
+                      return { ...tc, status: 'success' as const };
+                    });
+                    // done 时同步 blocks 的 output（保留 tool_call_id 和已更新的 status）
+                    const updatedBlocks = (m.blocks || []).map(b => {
+                      if (b.type !== 'tool') return b;
+                      return {
+                        ...b,
+                        toolCalls: (b.toolCalls || []).map(tc => {
+                          const step = tc.tool_call_id ? stepMap.get(tc.tool_call_id) : undefined;
+                          if (step) {
+                            return { ...tc, output: step.output || tc.output, status: step.status || 'success' as const };
+                          }
+                          return { ...tc, status: 'success' as const };
+                        }),
+                      };
+                    });
+                    return {
+                      ...m,
+                      content: event.data.answer || m.content,
+                      isStreaming: false,
+                      tool_calls: finalToolCalls,
+                      blocks: updatedBlocks,
+                      metadata: event.data.metadata,
+                    };
+                  });
                   return { ...prev, messages: finalMessages, conversation_id: event.data.conversation_id };
                 });
                 break;
               }
               case 'error': {
                 assistantMessage.content = `⚠️ ${event.data.message}`;
+                assistantMessage.isStreaming = false;
+                streamingBlocks = [];
                 setCurrentSession(prev => ({
                   ...prev!,
                   messages: prev!.messages.map(m =>
                     m.id === assistantMsgId ? {
                       ...m,
                       content: `⚠️ ${event.data.message}`,
+                      isStreaming: false,
+                      blocks: [],
                       // 保留已收集的 tool_calls（执行中途出错时工具调用记录仍有价值）
                       tool_calls: m.tool_calls && m.tool_calls.length > 0 ? m.tool_calls : undefined,
                     } : m
@@ -526,7 +615,7 @@ const AppRunner: React.FC = () => {
   const isAgent = app.app_type === 'agent';
 
   return (
-    <div className="flex h-screen bg-page overflow-hidden">
+    <div className="flex bg-page overflow-hidden" style={{ height: 'calc(100vh - 32px)' }}>
       {/* ===== 左侧 chatHistory ===== */}
       <div className="w-72 flex-shrink-0 bg-sidebar border-r border-border flex flex-col h-full">
         {/* 顶部：新建对话 */}
@@ -657,9 +746,8 @@ const AppRunner: React.FC = () => {
                   {/* 头像 */}
                   <Avatar
                     icon={msg.role === 'user' ? <UserOutlined /> : <RobotOutlined />}
-                    className={`flex-shrink-0 ${
-                      msg.role === 'user' ? '!bg-primary' : '!bg-green-500'
-                    }`}
+                    className={`flex-shrink-0 ${msg.role === 'user' ? '!bg-primary' : '!bg-green-500'
+                      }`}
                   />
                   {/* 内容 */}
                   <div className={`flex flex-col max-w-[80%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
@@ -673,7 +761,82 @@ const AppRunner: React.FC = () => {
                         }
                       `}
                     >
-                      <div className="whitespace-pre-wrap">{msg.content}</div>
+                      {/* 用户消息：纯文本 */}
+                      {msg.role === 'user' && (
+                        <div className="whitespace-pre-wrap">{msg.content}</div>
+                      )}
+                      {/* AI 消息：按 blocks 渲染（思考 → 工具 → 文本） */}
+                      {msg.role === 'assistant' && msg.blocks && msg.blocks.length > 0 && (
+                        <div className="space-y-3">
+                          {msg.blocks.map((block, idx) => {
+                            if (block.type === 'thinking') {
+                              return (
+                                <div className="flex items-center gap-2 text-text-secondary text-sm">
+                                  <Spin size="small" />
+                                  <span>正在思考...</span>
+                                </div>
+                              );
+                            }
+                            if (block.type === 'tool') {
+                              return (
+                                <div key={idx} className="space-y-2">
+                                  {(block.toolCalls || []).map((tc, tcIdx) => (
+                                    <div key={tc.tool_call_id || tc.id || tcIdx} className="bg-blue-50 border border-blue-200 rounded-lg p-2.5">
+                                      <div className="flex items-center gap-2 mb-1.5">
+                                        {tc.status === 'running' && <LoadingOutlined className="text-blue-500 text-xs" />}
+                                        {tc.status === 'success' && <CheckCircleOutlined className="text-green-500 text-xs" />}
+                                        {tc.status === 'error' && <CloseCircleOutlined className="text-red-500 text-xs" />}
+                                        <ToolOutlined className="text-blue-500 text-xs" />
+                                        <span className="text-xs font-medium text-blue-800">{tc.tool}</span>
+                                        <Tag color={tc.status === 'running' ? 'processing' : tc.status === 'success' ? 'success' : 'error'} className="!text-xs !leading-normal !px-1.5 !py-0">
+                                          {tc.status === 'running' ? '执行中...' : tc.status === 'success' ? '完成' : '失败'}
+                                        </Tag>
+                                      </div>
+                                      {(tc.input || tc.output) && (
+                                        <Collapse
+                                          ghost
+                                          size="small"
+                                          items={[
+                                            ...(tc.input ? [{
+                                              key: 'input',
+                                              label: <span className="text-xs text-gray-500">输入参数</span>,
+                                              children: <pre className="text-xs bg-white p-2 rounded border border-blue-100 overflow-x-auto whitespace-pre-wrap break-all">{tc.input}</pre>,
+                                            }] : []),
+                                            ...(tc.output ? [{
+                                              key: 'output',
+                                              label: <span className="text-xs text-gray-500">执行结果</span>,
+                                              children: <pre className="text-xs bg-white p-2 rounded border border-blue-100 overflow-x-auto whitespace-pre-wrap break-all">{tc.output}</pre>,
+                                            }] : []),
+                                          ]}
+                                        />
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              );
+                            }
+                            return (
+                              <div key={idx} className="markdown-body">
+                                <Markdown remarkPlugins={[remarkGfm]}>{block.content || ''}</Markdown>
+                                {msg.isStreaming && (
+                                  <span className="inline-block w-1.5 h-4 ml-0.5 bg-gray-400 animate-pulse align-text-bottom" />
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {/* AI 消息 fallback：无 blocks 时用纯文本，流式时显示思考中 */}
+                      {msg.role === 'assistant' && (!msg.blocks || msg.blocks.length === 0) && (
+                        <div className="markdown-body">
+                          {msg.isStreaming && !msg.content ? (
+                            <div className="flex items-center gap-2 text-text-secondary text-sm">
+                              <Spin size="small" />
+                              <span>正在思考...</span>
+                            </div>
+                          ) : <Markdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</Markdown>}
+                        </div>
+                      )}
                     </div>
 
                     {/* 知识库引用 */}
@@ -715,23 +878,6 @@ const AppRunner: React.FC = () => {
                       </div>
                     )}
 
-                    {/* Agent 运行日志按钮 */}
-                    {isAgent && msg.role === 'assistant' && (
-                      <div className="mt-1.5">
-                        <Tooltip title="查看 Agent 运行日志">
-                          <Button
-                            size="small"
-                            type="dashed"
-                            icon={<BugOutlined />}
-                            onClick={() => handleViewLogs(msg)}
-                            className="!text-purple-600 !border-purple-400 hover:!text-purple-700"
-                          >
-                            运行日志 {msg.tool_calls ? `(${msg.tool_calls.length})` : ''}
-                          </Button>
-                        </Tooltip>
-                      </div>
-                    )}
-
                     {/* 时间戳 */}
                     <span className="text-xs text-text-secondary mt-1">
                       {msg.timestamp.toLocaleTimeString()}
@@ -746,7 +892,7 @@ const AppRunner: React.FC = () => {
 
         {/* ===== chatInput 底部输入区域 ===== */}
         {currentSession && (
-          <div className="border-t border-border bg-sidebar flex-shrink-0">
+          <div className="border-t border-border flex-shrink-0">
             <div className="max-w-3xl mx-auto px-4 py-3">
               <div className="flex items-end gap-2 bg-white rounded-xl border border-gray-200 shadow-sm px-3 py-2 focus-within:border-primary focus-within:shadow-md transition-all">
                 {/* 附件按钮 */}
@@ -802,124 +948,6 @@ const AppRunner: React.FC = () => {
         )}
       </div>
 
-      {/* Agent 运行日志抽屉 */}
-      <Drawer
-        title={
-          <span className="flex items-center gap-2">
-            <BugOutlined className="text-purple-600" />
-            <span>Agent 运行日志</span>
-          </span>
-        }
-        placement="right"
-        width={600}
-        open={logDrawerOpen}
-        onClose={() => setLogDrawerOpen(false)}
-      >
-        {selectedMessageLogs.length === 0 ? (
-          <div className="p-6">
-            <div className="text-center text-text-secondary py-8">暂无工具调用记录</div>
-            <div className="mt-4 p-3 bg-page rounded-lg text-sm text-text-secondary">
-              可能原因：<br />
-              1. Agent 未配置工具<br />
-              2. 工具调用未返回 intermediate_steps<br />
-              3. 检查后端日志获取更多信息
-            </div>
-          </div>
-        ) : (
-          <Timeline
-            items={selectedMessageLogs.map((log) => ({
-              dot: log.status === 'success'
-                ? <CheckCircleOutlined className="text-green-500" />
-                : log.status === 'error'
-                  ? <ClockCircleOutlined className="text-red-500" />
-                  : <LoadingOutlined className="text-primary" />,
-              children: (
-                <div className="mb-4">
-                  <div className="flex items-center gap-2 mb-2">
-                    <Tag color="purple">{log.tool}</Tag>
-                    <Badge
-                      status={log.status === 'success' ? 'success' : log.status === 'error' ? 'error' : 'processing'}
-                      text={log.status === 'success' ? '成功' : log.status === 'error' ? '失败' : '执行中'}
-                    />
-                    {log.duration && (
-                      <span className="text-xs text-text-secondary">{log.duration}ms</span>
-                    )}
-                  </div>
-                  {log.thought && (
-                    <div className="mb-3 p-3 bg-blue-50 rounded-md border border-blue-200 text-sm">
-                      <span className="text-text-secondary text-xs">💭 思考过程:</span>
-                      <div className="mt-1 whitespace-pre-wrap">{log.thought}</div>
-                    </div>
-                  )}
-                  <Collapse
-                    ghost
-                    size="small"
-                    items={[
-                      {
-                        key: 'input',
-                        label: <span className="font-medium">📥 工具输入</span>,
-                        children: (
-                          <pre className="bg-page p-3 rounded-md text-xs max-h-48 overflow-auto m-0 whitespace-pre-wrap break-all">
-                            {log.input}
-                          </pre>
-                        ),
-                      },
-                      {
-                        key: 'output',
-                        label: <span className="font-medium">📤 工具输出</span>,
-                        children: (
-                          <pre className="bg-page p-3 rounded-md text-xs max-h-64 overflow-auto m-0 whitespace-pre-wrap break-all">
-                            {log.output}
-                          </pre>
-                        ),
-                      },
-                    ]}
-                  />
-                  <div className="mt-2 text-xs text-text-secondary">
-                    <ClockCircleOutlined /> {log.timestamp.toLocaleTimeString()}
-                  </div>
-                </div>
-              ),
-            }))}
-          />
-        )}
-
-        {/* 元数据信息 */}
-        {currentSession && currentSession.messages.length > 0 && (() => {
-          const selectedMsg = currentSession.messages.find(m => m.id === selectedMessageLogs[0]?.messageId);
-          const thoughts = selectedMsg?.metadata?.thoughts;
-          return (
-            <div>
-              {thoughts && thoughts.length > 0 && (
-                <div className="mt-4">
-                  <div className="font-medium text-sm mb-2">💭 思考过程</div>
-                  {thoughts.map((thought: string, idx: number) => (
-                    <div key={idx} className="mb-2 p-2 bg-yellow-50 rounded text-xs">
-                      <span className="text-text-secondary">第 {idx + 1} 步推理：</span>
-                      <div className="mt-1 whitespace-pre-wrap">{thought}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div className="mt-4">
-                <Collapse
-                  ghost
-                  size="small"
-                  items={[{
-                    key: 'metadata',
-                    label: <span className="text-sm text-text-secondary">📊 响应元数据</span>,
-                    children: (
-                      <pre className="bg-page p-3 rounded-md text-xs max-h-64 overflow-auto m-0">
-                        {JSON.stringify(selectedMsg?.metadata || {}, null, 2)}
-                      </pre>
-                    ),
-                  }]}
-                />
-              </div>
-            </div>
-          );
-        })()}
-      </Drawer>
     </div>
   );
 };

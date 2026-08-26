@@ -26,6 +26,7 @@ def _verify_app(db: Session, user: User, app_id: int):
     return app
 
 
+@router.get("", response_model=PublishConfigListResponse)
 @router.get("/", response_model=PublishConfigListResponse)
 def get_all_configs(
     *,

@@ -387,7 +387,7 @@ const WorkflowEditor: React.FC = () => {
   return (
     <div className="h-screen flex flex-col">
       {/* 顶部工具栏 */}
-      <div className="px-4 py-2 border-b border-border bg-white flex items-center justify-between">
+      <div className="px-4 py-2 border-b border-border bg-white flex items-center justify-between ">
         <Breadcrumb
           items={[
             { title: <Link to="/apps">应用</Link> },

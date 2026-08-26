@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 from app.models.app import App
 from app.models.publish_config import PublishConfig
 
-
 # 所有支持的发布渠道
 ALL_CHANNELS = ["api", "mcp", "embed", "wechat", "h5"]
 
@@ -27,9 +26,7 @@ def _generate_mcp_config(app: App, base_url: str) -> Dict[str, Any]:
         "mcpServers": {
             app.name: {
                 "url": f"{base_url}/api/v1/apps/{app.id}/mcp",
-                "headers": {
-                    "Authorization": "Bearer <your-api-key>"
-                }
+                "headers": {"Authorization": "Bearer <your-api-key>"},
             }
         }
     }
@@ -38,23 +35,39 @@ def _generate_mcp_config(app: App, base_url: str) -> Dict[str, Any]:
 def _generate_embed_code(app_id: int, base_url: str) -> str:
     """生成 iframe 嵌入代码"""
     return (
-        f'<iframe\n'
+        f"<iframe\n"
         f'  src="{base_url}/api/v1/apps/{app_id}/embed"\n'
         f'  width="400"\n'
         f'  height="600"\n'
         f'  frameborder="0"\n'
         f'  style="border: 1px solid #e5e7eb; border-radius: 12px;"\n'
-        f'></iframe>'
+        f"></iframe>"
     )
 
 
 def _generate_wechat_guide(app_id: int, webhook_url: str) -> List[Dict[str, str]]:
     """生成微信公众号对接指引"""
     return [
-        {"step": "1", "title": "创建公众号自定义菜单", "description": "在公众号后台 → 自定义菜单 → 添加菜单项"},
-        {"step": "2", "title": "配置服务器地址", "description": f"将服务器 URL 设置为: {webhook_url}"},
-        {"step": "3", "title": "设置 Token", "description": "在公众号后台 → 基本配置 → 服务器配置，填写 Token"},
-        {"step": "4", "title": "提交验证", "description": "点击提交，系统将自动验证并启用"},
+        {
+            "step": "1",
+            "title": "创建公众号自定义菜单",
+            "description": "在公众号后台 → 自定义菜单 → 添加菜单项",
+        },
+        {
+            "step": "2",
+            "title": "配置服务器地址",
+            "description": f"将服务器 URL 设置为: {webhook_url}",
+        },
+        {
+            "step": "3",
+            "title": "设置 Token",
+            "description": "在公众号后台 → 基本配置 → 服务器配置，填写 Token",
+        },
+        {
+            "step": "4",
+            "title": "提交验证",
+            "description": "点击提交，系统将自动验证并启用",
+        },
     ]
 
 
@@ -73,9 +86,7 @@ class PublishService:
     def __init__(self, db: Session):
         self.db = db
 
-    def _get_or_create_config(
-        self, app_id: int, channel: str
-    ) -> PublishConfig:
+    def _get_or_create_config(self, app_id: int, channel: str) -> PublishConfig:
         """获取或创建渠道配置"""
         config = (
             self.db.query(PublishConfig)
@@ -97,7 +108,7 @@ class PublishService:
 
     def _get_base_url(self) -> str:
         """获取基础 URL（生产环境应从配置读取）"""
-        return "http://localhost:8000"
+        return "http://localhost:3000"
 
     def get_all_configs(self, app_id: int) -> List[Dict[str, Any]]:
         """获取应用所有渠道配置"""
@@ -159,16 +170,24 @@ class PublishService:
         base_url = self._get_base_url()
         if channel == "api" and "api_key" not in existing_config:
             existing_config["api_key"] = _generate_api_key()
-            existing_config["api_endpoint"] = f"{base_url}/api/v1/apps/{app_id}/chat"
+            existing_config["api_endpoint"] = (
+                f"{base_url}/api/v1/apps/{app_id}/api/chat"
+            )
         elif channel == "mcp" and "mcp_config" not in existing_config:
             existing_config["mcp_config"] = _generate_mcp_config(app, base_url)
-            existing_config["mcp_command"] = f"npx mcp-remote {base_url}/api/v1/apps/{app_id}/mcp"
+            existing_config["mcp_command"] = (
+                f"npx mcp-remote {base_url}/api/v1/apps/{app_id}/mcp"
+            )
         elif channel == "embed" and "embed_code" not in existing_config:
             existing_config["embed_code"] = _generate_embed_code(app_id, base_url)
             existing_config["embed_url"] = f"{base_url}/api/v1/apps/{app_id}/embed"
         elif channel == "wechat" and "webhook_url" not in existing_config:
-            existing_config["webhook_url"] = f"{base_url}/api/v1/apps/{app_id}/wechat/webhook"
-            existing_config["guide"] = _generate_wechat_guide(app_id, existing_config["webhook_url"])
+            existing_config["webhook_url"] = (
+                f"{base_url}/api/v1/apps/{app_id}/wechat/webhook"
+            )
+            existing_config["guide"] = _generate_wechat_guide(
+                app_id, existing_config["webhook_url"]
+            )
         elif channel == "h5" and "h5_url" not in existing_config:
             h5_data = _generate_h5_url(app_id, base_url)
             existing_config["h5_url"] = h5_data["url"]

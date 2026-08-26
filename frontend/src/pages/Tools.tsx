@@ -237,6 +237,9 @@ const Tools: React.FC = () => {
       return_schema: tool.return_schema
         ? JSON.stringify(tool.return_schema, null, 2)
         : undefined,
+      auth_config: tool.auth_config
+        ? JSON.stringify(tool.auth_config, null, 2)
+        : undefined,
     })
     setEditModalVisible(true)
   }

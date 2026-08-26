@@ -6,7 +6,6 @@ import {
   Button,
   Avatar,
   Dropdown,
-  Space,
   Typography,
 } from 'antd'
 import {
@@ -22,14 +21,51 @@ import {
 } from '@ant-design/icons'
 import { useAuthStore } from '../../stores/auth'
 
-const { Header, Sider, Content } = Layout
+const { Sider, Content } = Layout
 const { Text } = Typography
+
+// 路由配置：hasPadding 控制 Content 是否有上下间距
+const routeConfig: Record<string, { hasPadding?: boolean }> = {
+  '/dashboard': { hasPadding: true },
+  '/apps': { hasPadding: true },
+  '/knowledge': { hasPadding: true },
+  '/models': { hasPadding: true },
+  '/tools': { hasPadding: true },
+  // 编排/调试/发布等页面无间距
+  '/apps/:appId/chatbot': { hasPadding: false },
+  '/apps/:appId/chatbot/debug': { hasPadding: false },
+  '/apps/:appId/workflow': { hasPadding: false },
+  '/apps/:appId/agent': { hasPadding: false },
+  '/apps/:appId/agent/debug': { hasPadding: false },
+  '/apps/:appId/publish': { hasPadding: false },
+  '/apps/:appId/run': { hasPadding: false },
+  '/knowledge/:id': { hasPadding: true },
+  '/models/:providerId': { hasPadding: true },
+}
+
+// 检查当前路由是否匹配配置（支持动态参数）
+const matchRouteConfig = (pathname: string) => {
+  // 精确匹配
+  if (routeConfig[pathname]) return routeConfig[pathname]
+  // 匹配动态路由（如 /apps/123/chatbot -> /apps/:appId/chatbot）
+  for (const [pattern, config] of Object.entries(routeConfig)) {
+    if (pattern.includes(':')) {
+      const regex = new RegExp('^' + pattern.replace(/:[^/]+/g, '[^/]+') + '$')
+      if (regex.test(pathname)) return config
+    }
+  }
+  return { hasPadding: true } // 默认有间距
+}
 
 const MainLayout: React.FC = () => {
   const [collapsed, setCollapsed] = useState(false)
   const navigate = useNavigate()
   const location = useLocation()
   const { user, logout } = useAuthStore()
+
+  // 当前路由的配置
+  const currentRouteConfig = matchRouteConfig(location.pathname)
+  const hasPadding = currentRouteConfig.hasPadding ?? true
 
   // 侧边栏菜单项
   const menuItems = [
@@ -96,40 +132,47 @@ const MainLayout: React.FC = () => {
         trigger={null}
         collapsible
         collapsed={collapsed}
-        className="overflow-auto h-screen fixed left-0 top-0 bottom-0 bg-white shadow-sider"
+        className="overflow-hidden h-screen fixed left-0 top-0 bottom-0 bg-white shadow-sider"
       >
-        <div className="h-header flex items-center justify-center border-b border-border">
-          <Text strong className="text-lg">
-            {collapsed ? 'AP' : '智能体平台'}
-          </Text>
+        <div className="flex flex-col h-full">
+          {/* 顶部 Logo */}
+          <div className="h-header flex items-center justify-center border-b border-border flex-shrink-0">
+            <Text strong className="text-lg">
+              {collapsed ? 'AP' : '智能体平台'}
+            </Text>
+          </div>
+
+          {/* 中间菜单 */}
+          <Menu
+            mode="inline"
+            selectedKeys={[selectedKey]}
+            items={menuItems}
+            onClick={handleMenuClick}
+            className="border-r-0 flex-1 overflow-auto"
+          />
+
+          {/* 底部用户区域 */}
+          <div className="border-t border-border flex-shrink-0">
+            <Dropdown menu={{ items: userMenuItems }} placement="topRight" trigger={['click']}>
+              <div className="flex items-center justify-center gap-2 py-3 cursor-pointer hover:bg-gray-50 transition-colors">
+                <Avatar icon={<UserOutlined />} size={collapsed ? 'small' : 'default'} />
+                {!collapsed && <Text className="text-sm">{user?.username || '用户'}</Text>}
+              </div>
+            </Dropdown>
+            <div className="flex justify-center pb-2">
+              <Button
+                type="text"
+                icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                onClick={() => setCollapsed(!collapsed)}
+                className="w-full h-8"
+              />
+            </div>
+          </div>
         </div>
-        <Menu
-          mode="inline"
-          selectedKeys={[selectedKey]}
-          items={menuItems}
-          onClick={handleMenuClick}
-          className="border-r-0"
-        />
       </Sider>
 
       <Layout className={`transition-all duration-200 ${collapsed ? 'ml-20' : 'ml-sider'}`}>
-        <Header className="px-6 bg-white flex items-center justify-between shadow-header sticky top-0 z-10">
-          <Button
-            type="text"
-            icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-            onClick={() => setCollapsed(!collapsed)}
-            className="w-16 h-16 text-base"
-          />
-
-          <Dropdown menu={{ items: userMenuItems }} placement="bottomRight">
-            <Space className="cursor-pointer">
-              <Avatar icon={<UserOutlined />} />
-              <Text>{user?.username || '用户'}</Text>
-            </Space>
-          </Dropdown>
-        </Header>
-
-        <Content className="m-3 px-4 bg-page rounded-lg min-h-[280px]">
+        <Content className={`${hasPadding ? 'py-3 overflow-y-auto' : ''} px-4 bg-page rounded-lg h-screen`}>
           <Outlet />
         </Content>
       </Layout>

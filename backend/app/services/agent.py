@@ -1,32 +1,115 @@
 """
-Agent 服务 — 使用 LangGraph create_react_agent 实现智能体编排
+Agent 服务 — 使用 LangChain 的 create_agent 实现智能体编排
 """
 
 import asyncio
 import json
+import re
 import time
 from datetime import datetime
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.app import App
 from app.models.user import User
-from app.schemas.agent import (
-    AgentChatRequest,
-    AgentChatResponse,
-    AgentConfig,
-    AgentUpdate,
-)
+from app.schemas.agent import AgentChatRequest, AgentChatResponse, AgentConfig
 from app.schemas.chatbot import KnowledgeBaseConfig
 from app.services.llm import LLMService
 from app.services.tool_registry import ToolRegistry
 from app.utils.logger import logger
+from langchain.agents import create_agent, AgentState
+from langchain.agents.middleware import after_model
+from langgraph.runtime import Runtime
+from langchain.messages import RemoveMessage
+
+MAX_MESSAGES = 4  # 默认值，实际使用时从 config.memory_window 读取
+
+
+def make_delete_old_messages(max_messages: int = MAX_MESSAGES):
+    """创建可配置的中间件：裁剪历史消息，保留首尾"""
+
+    @after_model
+    def _delete_old_messages(state: AgentState, runtime: Runtime) -> dict | None:
+        messages = state["messages"]
+        if len(messages) > max_messages:
+            tail = len(messages) - max_messages
+            remove_messages = messages[3:tail]
+            return {"messages": [RemoveMessage(id=m.id) for m in remove_messages]}
+        return None
+
+    return _delete_old_messages
+
+
+def _get_checkpointer():
+    """
+    获取 LangGraph checkpointer 实例
+
+    优先使用 SQLite checkpointer（持久化），复用现有数据库配置
+    如果不可用则回退到 InMemorySaver
+    """
+    try:
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+        from app.core.config import settings
+
+        # 复用现有的数据库配置，提取数据库文件路径
+        db_url = settings.DATABASE_URL
+        if db_url.startswith("sqlite:///"):
+            # 从 URL 提取数据库文件路径
+            db_path = db_url.replace("sqlite:///", "")
+            return AsyncSqliteSaver.from_conn_string(db_path)
+        else:
+            # 非 SQLite 数据库时回退到内存 checkpointer
+            logger.warning("当前数据库不是 SQLite，使用内存 checkpointer")
+            from langgraph.checkpoint.memory import InMemorySaver
+
+            return InMemorySaver()
+    except ImportError:
+        logger.warning("langgraph-checkpoint-sqlite 未安装，使用内存 checkpointer")
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        return InMemorySaver()
+
+
+def _parse_thinking_tags(content: str) -> Tuple[str, str]:
+    """
+    解析内容中的思考标签，分离思考过程和最终回答
+
+    支持格式:
+    - <thinking>...</thinking>
+    <think>...</think>
+    - <think>...</think>
+
+    Returns:
+        (thinking, answer): 思考内容和回答内容
+    """
+    if not content:
+        return "", ""
+
+    # 匹配各种思考标签格式
+    patterns = [
+        r"<thinking>(.*?)</thinking>",  # <thinking>...</thinking>
+        r"<think>(.*?)</think>",  # <think>...</think>
+        r"<think>(.*?)</think>",  # <think>...</think>
+    ]
+
+    thinking_parts = []
+    answer = content
+
+    for pattern in patterns:
+        matches = re.findall(pattern, content, re.DOTALL)
+        if matches:
+            thinking_parts.extend(matches)
+            # 从回答中移除思考标签
+            answer = re.sub(pattern, "", content, flags=re.DOTALL).strip()
+
+    thinking = "\n\n".join(thinking_parts).strip()
+    return thinking, answer
 
 
 class AgentService:
     """
-    Agent 服务 - 使用 LangGraph create_react_agent
+    Agent 服务 - LangChain 的 create_agent
     """
 
     def __init__(self, db: Session):
@@ -81,7 +164,164 @@ class AgentService:
         return True
 
     # ------------------------------------------------------------------
-    # 对话处理 - 使用 LangGraph create_react_agent
+    # Agent 构建（公共逻辑）
+    # ------------------------------------------------------------------
+
+    async def _build_agent(
+        self,
+        config: AgentConfig,
+        query: str,
+        context_text: str,
+        conversation_id: int,
+        checkpointer=None,
+    ):
+        """
+        构建 Agent 及执行参数（chat / chat_stream 共用）
+
+        Args:
+            checkpointer: 可选，由调用方传入（流式场景需 async with 管理生命周期）
+
+        Returns:
+            (agent, agent_config, inputs, system_prompt)
+        Raises:
+            ValueError: LLM 配置无效
+        """
+        llm = await self._get_llm(config)
+        if not llm:
+            raise ValueError(
+                "请先在 Agent 编排页面配置模型"
+                if not config.model_id
+                else "模型配置无效，请检查模型 ID 和 API Key"
+            )
+
+        tools = await self._get_tools(config)
+        system_prompt = self._build_system_prompt(config, context_text)
+
+        from langchain_core.messages import HumanMessage
+
+        # 根据配置决定是否使用 checkpointer（对话记忆）
+        if config.memory_enabled:
+            if checkpointer is None:
+                checkpointer = _get_checkpointer()
+        else:
+            checkpointer = None
+
+        # 使用配置的 memory_window 作为消息裁剪上限
+        delete_middleware = make_delete_old_messages(config.memory_window)
+
+        agent = create_agent(
+            model=llm,
+            tools=tools,
+            middleware=[delete_middleware],
+            system_prompt=system_prompt or "你是一个有用的AI助手。",
+            checkpointer=checkpointer,
+        )
+
+        inputs = {"messages": [HumanMessage(content=query)]}
+        agent_config = {
+            "recursion_limit": config.max_iterations * 2,
+            "configurable": {"thread_id": str(conversation_id)},
+        }
+
+        logger.info(
+            f"Agent 就绪: tools={len(tools)}, max_iterations={config.max_iterations}, "
+            f"thread_id={conversation_id}"
+        )
+        return agent, agent_config, inputs, system_prompt
+
+    def _extract_result(self, result: dict) -> tuple[str, list, list]:
+        """
+        从 ainvoke 结果中提取 answer / intermediate_steps / thoughts
+        """
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        answer = ""
+        intermediate_steps = []
+        step_index = 0
+        last_thought = ""
+
+        for msg in result.get("messages", []):
+            if isinstance(msg, AIMessage):
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        intermediate_steps.append(
+                            {
+                                "tool": tc.get("name", "unknown"),
+                                "input": str(tc.get("args", {})),
+                                "output": "",
+                                "thought": last_thought,
+                                "status": "running",
+                                "duration": None,
+                            }
+                        )
+                        last_thought = ""
+            elif isinstance(msg, ToolMessage):
+                if step_index < len(intermediate_steps):
+                    intermediate_steps[step_index]["output"] = str(msg.content)
+                    intermediate_steps[step_index]["status"] = "success"
+                    step_index += 1
+                else:
+                    intermediate_steps.append(
+                        {
+                            "tool": msg.name or "unknown",
+                            "input": "",
+                            "output": str(msg.content),
+                            "thought": "",
+                            "status": "success",
+                        }
+                    )
+
+        # 回退：取最后一条无 tool_calls 的 AIMessage
+        if not answer:
+            for msg in reversed(result.get("messages", [])):
+                if (
+                    isinstance(msg, AIMessage)
+                    and msg.content
+                    and not (hasattr(msg, "tool_calls") and msg.tool_calls)
+                ):
+                    answer = msg.content
+                    break
+
+        thoughts = [s["thought"] for s in intermediate_steps if s.get("thought")]
+        return answer or "Agent 未能生成回答", intermediate_steps, thoughts
+
+    # ------------------------------------------------------------------
+    # 对话公共准备（变量替换 / 知识库 / 会话 / 消息保存）
+    # ------------------------------------------------------------------
+
+    async def _prepare_conversation(
+        self,
+        app_id: int,
+        request: AgentChatRequest,
+        user: User,
+        config: AgentConfig,
+    ) -> tuple[int, str, str, list]:
+        """
+        公共前置逻辑：变量替换、知识库检索、会话管理、保存用户消息
+
+        Returns:
+            (conversation_id, query, context_text, citations)
+        """
+        query = request.query
+        if request.inputs:
+            query = self._replace_variables(query, request.inputs, config)
+
+        context_text = ""
+        citations: list = []
+        if config.knowledge_bases:
+            context_text, citations = await self._retrieve_knowledge(
+                config.knowledge_bases, query
+            )
+
+        conversation_id = request.conversation_id
+        if not conversation_id:
+            conversation_id = self._create_conversation(app_id, user.id, query)
+
+        self._save_message(conversation_id, "user", query)
+        return conversation_id, query, context_text, citations
+
+    # ------------------------------------------------------------------
+    # 非流式对话
     # ------------------------------------------------------------------
 
     async def chat(
@@ -90,79 +330,47 @@ class AgentService:
         request: AgentChatRequest,
         user: User,
     ) -> AgentChatResponse:
-        """
-        处理 Agent 聊天请求
-
-        使用 LangGraph 的 create_react_agent 实现工具调用循环
-
-        流程:
-        1. 获取配置
-        2. 变量替换
-        3. 知识库检索（如有）
-        4. 创建 React Agent
-        5. 执行 Agent
-        6. 返回结果
-        """
+        """非流式 Agent 聊天 — ainvoke 整体返回"""
         config = self.get_agent_config(app_id)
         if not config:
             raise ValueError("Agent 配置不存在")
 
-        logger.info(
-            f"Agent 聊天请求: app_id={app_id}, model_id={config.model_id}, 工具数量: {len(config.tools) if config.tools else 0}"
+        logger.info(f"Agent 聊天: app_id={app_id}, model_id={config.model_id}")
+
+        conversation_id, query, context_text, citations = (
+            await self._prepare_conversation(app_id, request, user, config)
         )
 
-        # 1. 变量替换
-        query = request.query
-        if request.inputs:
-            query = self._replace_variables(query, request.inputs, config)
-
-        # 2. 知识库检索
-        context_text = ""
-        citations: List[Dict[str, Any]] = []
-        if config.knowledge_bases:
-            context_text, citations = await self._retrieve_knowledge(
-                config.knowledge_bases, query
-            )
-
-        # 3. 获取或创建会话
-        conversation_id = request.conversation_id
-        if not conversation_id:
-            conversation_id = self._create_conversation(app_id, user.id, query)
-
-        # 4. 保存用户消息
-        self._save_message(conversation_id, "user", query)
-
-        # 5. 使用 LangGraph 执行 Agent
         try:
-            result = await self._execute_agent(
-                config=config,
-                query=query,
-                context_text=context_text,
-                conversation_id=conversation_id,
+            agent, agent_config, inputs, _ = await self._build_agent(
+                config, query, context_text, conversation_id
             )
-            answer = result["answer"]
-            intermediate_steps = result.get("intermediate_steps", [])
-            thoughts = result.get("thoughts", [])
+            result = await asyncio.wait_for(
+                agent.ainvoke(inputs, config=agent_config), timeout=150
+            )
+            answer, intermediate_steps, thoughts = self._extract_result(result)
         except ValueError as e:
-            # 配置错误（如未配置模型），直接返回错误信息
             logger.warning(f"Agent 配置错误: {e}")
-            answer = f"⚠️ {str(e)}"
-            intermediate_steps = []
-            thoughts = []
+            answer, intermediate_steps, thoughts = f"⚠️ {e}", [], []
+        except asyncio.TimeoutError:
+            logger.error("Agent 执行超时")
+            answer, intermediate_steps, thoughts = (
+                "⚠️ Agent 执行超时，请简化问题",
+                [],
+                [],
+            )
         except Exception as e:
             logger.error(f"Agent 执行失败: {e}", exc_info=True)
             answer = self._generate_demo_response(query, context_text)
-            intermediate_steps = []
-            thoughts = []
+            intermediate_steps, thoughts = [], []
 
-        # 6. 保存助手回复（包含 tool_calls 到 metadata）
         metadata = {
             "model": config.model_name,
             "tools_used": [t.name for t in config.tools if t.enabled],
             "knowledge_context": context_text[:500] if context_text else None,
-            "citations": citations if citations else None,
-            "tool_calls": intermediate_steps,  # 保存工具调用记录
-            "thoughts": thoughts,  # 保存思考过程
+            "citations": citations or None,
+            "tool_calls": intermediate_steps,
+            "thoughts": thoughts,
         }
         message_id = self._save_message(conversation_id, "assistant", answer, metadata)
 
@@ -175,7 +383,7 @@ class AgentService:
         )
 
     # ------------------------------------------------------------------
-    # 流式对话处理
+    # 流式对话
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -190,120 +398,62 @@ class AgentService:
         user: User,
     ) -> AsyncGenerator[str, None]:
         """
-        流式处理 Agent 聊天请求
+        流式 Agent 聊天 — astream_events 逐 token yield SSE 事件
 
-        逐步 yield SSE 事件:
-        - tool_start: 工具调用开始
-        - tool_end: 工具调用完成
-        - thinking: Agent 推理过程
-        - message: 最终回答的文本片段
-        - done: 执行完成
-        - error: 错误
+        事件类型: message / tool_start / tool_end / thinking / done / error
         """
         config = self.get_agent_config(app_id)
         if not config:
             yield self._sse_event("error", {"message": "Agent 配置不存在"})
             return
 
-        logger.info(f"Agent 流式聊天请求: app_id={app_id}, model_id={config.model_id}")
+        logger.info(f"Agent 流式聊天: app_id={app_id}, model_id={config.model_id}")
 
-        # 1. 变量替换
-        query = request.query
-        if request.inputs:
-            query = self._replace_variables(query, request.inputs, config)
+        # 公共前置
+        conversation_id, query, context_text, citations = (
+            await self._prepare_conversation(app_id, request, user, config)
+        )
 
-        # 2. 知识库检索
-        context_text = ""
-        citations: List[Dict[str, Any]] = []
-        if config.knowledge_bases:
-            context_text, citations = await self._retrieve_knowledge(
-                config.knowledge_bases, query
-            )
-
-        # 3. 获取或创建会话
-        conversation_id = request.conversation_id
-        if not conversation_id:
-            conversation_id = self._create_conversation(app_id, user.id, query)
-
-        # 4. 保存用户消息
-        self._save_message(conversation_id, "user", query)
-
-        # 5. 获取 LLM 和工具
-        llm = await self._get_llm(config)
-        if not llm:
-            error_msg = (
-                "请先在 Agent 编排页面配置模型"
-                if not config.model_id
-                else "模型配置无效"
-            )
-            yield self._sse_event("error", {"message": error_msg})
-            return
-
-        tools = await self._get_tools(config)
-        print(f"工具列表: {tools}")
-        system_prompt = self._build_system_prompt(config, context_text)
-
-        # 6. 创建 Agent 并流式执行
+        # 创建 Agent（checkpointer 由 async with 管理生命周期）
         try:
-            from langchain.agents import create_agent
-            from langchain_core.messages import HumanMessage, AIMessage
+            from langchain_core.messages import AIMessage
 
-            agent = create_agent(
-                model=llm,
-                tools=tools,
-                system_prompt=system_prompt or "你是一个有用的AI助手。",
-            )
-
-            inputs = {"messages": [HumanMessage(content=query)]}
-            agent_config = {"recursion_limit": config.max_iterations * 2}
-
-            logger.info(
-                f"执行流式 LangChain Agent, 工具数: {len(tools)}, 最大迭代: {config.max_iterations}"
-            )
             start_time = time.time()
-
-            # 使用 astream_events v2 流式执行
-            intermediate_steps = []
-            all_thoughts = []
+            intermediate_steps: list = []
             final_answer = ""
-            streamed_any = False  # 是否已逐 token 发送过内容
+            streamed_any = False
 
-            try:
-                async for event in agent.astream_events(
-                    inputs, config=agent_config, version="v2"
-                ):
+            # 根据配置决定是否创建 checkpointer
+            async def _run_agent_events(agent, agent_config, inputs):
+                nonlocal final_answer, streamed_any
+                async for event in agent.astream_events(inputs, config=agent_config, version="v2"):
                     kind = event.get("event", "")
-                    data = event.get("data", {})
-                    event_name = event.get("name", "")
+                    evt_data = event.get("data", {})
 
-                    # 1. LLM 流式输出（逐 token）
+                    # LLM 流式输出（逐 token）
                     if kind == "on_chat_model_stream":
-                        chunk = data.get("chunk")
-                        if chunk and hasattr(chunk, "content") and chunk.content:
-                            if not (hasattr(chunk, "tool_calls") and chunk.tool_calls):
-                                final_answer += chunk.content
-                                streamed_any = True
-                                yield self._sse_event(
-                                    "message", {"content": chunk.content}
-                                )
+                        chunk = evt_data.get("chunk")
+                        text = getattr(chunk, "content", "") or ""
+                        if text:
+                            final_answer += text
+                            streamed_any = True
+                            yield self._sse_event("message", {"content": text})
 
-                    # 2. LLM 完成（含完整响应）
+                    # LLM 完成（含完整响应）
                     elif kind == "on_chat_model_end":
-                        msg = data.get("output")
+                        msg = evt_data.get("output")
                         if isinstance(msg, AIMessage):
+                            if msg.content and not final_answer:
+                                final_answer = msg.content
                             if hasattr(msg, "tool_calls") and msg.tool_calls:
-                                # LLM 请求调用工具
-                                if msg.content:
-                                    all_thoughts.append(msg.content)
-                                    yield self._sse_event(
-                                        "thinking", {"content": msg.content}
-                                    )
                                 for tc in msg.tool_calls:
                                     tool_name = tc.get("name", "unknown")
                                     tool_input = str(tc.get("args", {}))
+                                    tc_id = tc.get("id", "")
                                     intermediate_steps.append(
                                         {
                                             "tool": tool_name,
+                                            "tool_call_id": tc_id,
                                             "input": tool_input,
                                             "output": "",
                                             "thought": "",
@@ -315,66 +465,88 @@ class AgentService:
                                         "tool_start",
                                         {
                                             "tool": tool_name,
+                                            "tool_call_id": tc_id,
                                             "input": tool_input,
                                         },
                                     )
-                            elif msg.content and not final_answer:
-                                # LLM 最终回答（无 tool_calls，非流式场景兜底）
-                                final_answer = msg.content
 
-                    # 3. 工具开始执行
-                    elif kind == "on_tool_start":
-                        pass  # 已在 on_chat_model_end 中处理
-
-                    # 4. 工具执行完成
+                    # 工具执行完成
                     elif kind == "on_tool_end":
-                        tool_output = str(data.get("output", ""))
-                        tool_name = event_name
-                        # 匹配最后一个 running 的 step
+                        tool_output = str(evt_data.get("output", ""))
+                        # on_tool_end 的 data 中有 tool_call_id
+                        done_tc_id = evt_data.get("tool_call_id", "")
                         for step in reversed(intermediate_steps):
                             if step["status"] == "running":
-                                step["output"] = tool_output
-                                step["status"] = "success"
-                                yield self._sse_event(
-                                    "tool_end",
-                                    {
-                                        "tool": step["tool"],
-                                        "output": tool_output[:500],
-                                        "status": "success",
-                                    },
-                                )
-                                break
+                                # 优先用 tool_call_id 精确匹配，回退到 name 匹配
+                                if (
+                                    done_tc_id
+                                    and step.get("tool_call_id") == done_tc_id
+                                ):
+                                    step["output"] = tool_output
+                                    step["status"] = "success"
+                                    yield self._sse_event(
+                                        "tool_end",
+                                        {
+                                            "tool": step["tool"],
+                                            "tool_call_id": done_tc_id,
+                                            "output": tool_output[:500],
+                                            "status": "success",
+                                        },
+                                    )
+                                    break
+                                elif not done_tc_id and step["tool"] == event.get(
+                                    "name", ""
+                                ):
+                                    step["output"] = tool_output
+                                    step["status"] = "success"
+                                    yield self._sse_event(
+                                        "tool_end",
+                                        {
+                                            "tool": step["tool"],
+                                            "tool_call_id": step.get(
+                                                "tool_call_id", ""
+                                            ),
+                                            "output": tool_output[:500],
+                                            "status": "success",
+                                        },
+                                    )
+                                    break
 
-            except asyncio.TimeoutError:
-                logger.error("Agent 流式执行超时")
-                yield self._sse_event(
-                    "error", {"message": "Agent 执行超时，请简化问题"}
+            # 根据配置决定是否创建 checkpointer
+            if config.memory_enabled:
+                async with _get_checkpointer() as checkpointer:
+                    agent, agent_config, inputs, _ = await self._build_agent(
+                        config, query, context_text, conversation_id,
+                        checkpointer=checkpointer,
+                    )
+                    async for event in _run_agent_events(agent, agent_config, inputs):
+                        yield event
+            else:
+                agent, agent_config, inputs, _ = await self._build_agent(
+                    config, query, context_text, conversation_id,
                 )
-                return
+                async for event in _run_agent_events(agent, agent_config, inputs):
+                    yield event
 
             total_duration = int((time.time() - start_time) * 1000)
             logger.info(f"Agent 流式执行完成, 耗时: {total_duration}ms")
 
-            # 7. 输出最终回答（流式已逐 token 发送过的不再重复）
             if not final_answer:
                 final_answer = "Agent 未能生成回答"
             if not streamed_any:
                 yield self._sse_event("message", {"content": final_answer})
 
-            # 8. 保存助手回复
             metadata = {
                 "model": config.model_name,
                 "tools_used": [t.name for t in config.tools if t.enabled],
                 "knowledge_context": context_text[:500] if context_text else None,
-                "citations": citations if citations else None,
+                "citations": citations or None,
                 "tool_calls": intermediate_steps,
-                "thoughts": all_thoughts,
             }
             message_id = self._save_message(
                 conversation_id, "assistant", final_answer, metadata
             )
 
-            # 9. 发送完成事件
             yield self._sse_event(
                 "done",
                 {
@@ -394,160 +566,6 @@ class AgentService:
         except Exception as e:
             logger.error(f"Agent 流式执行异常: {e}", exc_info=True)
             yield self._sse_event("error", {"message": f"Agent 执行失败: {str(e)}"})
-
-    async def _execute_agent(
-        self,
-        config: AgentConfig,
-        query: str,
-        context_text: str,
-        conversation_id: int,
-    ) -> Dict[str, Any]:
-        """
-        使用 langchain create_agent 执行 Agent
-
-        React Agent 会自动循环调用工具直到得到最终答案
-        """
-        import time
-
-        # 获取 LLM 模型
-        logger.info("步骤1: 获取 LLM 模型...")
-        llm = await self._get_llm(config)
-        logger.info(f"步骤1完成: LLM={type(llm).__name__ if llm else 'None'}")
-        if not llm:
-            if not config.model_id:
-                raise ValueError("请先在 Agent 编排页面配置模型")
-            else:
-                raise ValueError("模型配置无效，请检查模型 ID 和 API Key")
-
-        # 获取工具列表
-        logger.info("步骤2: 获取工具列表...")
-        tools = await self._get_tools(config)
-        logger.info(f"步骤2完成: 工具数={len(tools)}")
-
-        # 构建系统提示词
-        system_prompt = self._build_system_prompt(config, context_text)
-        logger.info(f"步骤3: 系统提示词长度={len(system_prompt)}")
-
-        try:
-            from langchain.agents import create_agent
-            from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-
-            # 创建 Agent
-            agent = create_agent(
-                model=llm,
-                tools=tools,
-                system_prompt=(
-                    system_prompt if system_prompt else "你是一个有用的AI助手。"
-                ),
-            )
-
-            # 构建输入
-            from langchain_core.messages import HumanMessage
-
-            inputs = {"messages": [HumanMessage(content=query)]}
-            agent_config = {"recursion_limit": config.max_iterations * 2}
-
-            # 执行 Agent
-            logger.info(
-                f"步骤4: 执行 LangChain Agent, 工具数: {len(tools)}, 最大迭代: {config.max_iterations}"
-            )
-            start_time = time.time()
-            try:
-                logger.info("步骤4a: 调用 agent.ainvoke ...")
-                result = await asyncio.wait_for(
-                    agent.ainvoke(inputs, config=agent_config), timeout=150
-                )  # 2.5分钟超时
-                logger.info("步骤4b: agent.ainvoke 返回")
-            except asyncio.TimeoutError:
-                total_duration = int((time.time() - start_time) * 1000)
-                logger.error(f"Agent 执行超时: {total_duration}ms")
-                return {
-                    "answer": "⚠️ Agent 执行超时，请尝试简化问题或减少工具数量。",
-                    "intermediate_steps": [],
-                    "total_duration": total_duration,
-                }
-            total_duration = int((time.time() - start_time) * 1000)
-            logger.info(f"Agent 执行完成, 耗时: {total_duration}ms")
-
-            # 提取最终回答和工具调用记录
-            answer = ""
-            intermediate_steps = []
-            step_index = 0
-            last_thought = ""  # 保存最近的思考内容
-
-            if "messages" in result:
-                for msg in result["messages"]:
-                    if isinstance(msg, AIMessage):
-                        if msg.content:
-                            last_thought = msg.content
-                        # 检查是否有工具调用
-                        if hasattr(msg, "tool_calls") and msg.tool_calls:
-                            for tool_call in msg.tool_calls:
-                                intermediate_steps.append(
-                                    {
-                                        "tool": tool_call.get("name", "unknown"),
-                                        "input": str(tool_call.get("args", {})),
-                                        "output": "",
-                                        "thought": last_thought,
-                                        "status": "running",
-                                        "duration": None,
-                                    }
-                                )
-                                last_thought = ""
-                        elif msg.content:
-                            # 没有工具调用且有内容 → 最终回答
-                            answer = msg.content
-                    elif isinstance(msg, ToolMessage):
-                        if step_index < len(intermediate_steps):
-                            intermediate_steps[step_index]["output"] = str(msg.content)
-                            intermediate_steps[step_index]["status"] = "success"
-                            step_index += 1
-                        else:
-                            intermediate_steps.append(
-                                {
-                                    "tool": msg.name or "unknown",
-                                    "input": "",
-                                    "output": str(msg.content),
-                                    "thought": "",
-                                    "status": "success",
-                                }
-                            )
-
-            # 收集所有的思考过程
-            all_thoughts = []
-            for step in intermediate_steps:
-                if step.get("thought"):
-                    all_thoughts.append(step["thought"])
-
-            if not answer:
-                # 回退：取最后一条有内容的 AIMessage
-                for msg in reversed(result.get("messages", [])):
-                    if (
-                        isinstance(msg, AIMessage)
-                        and msg.content
-                        and not (hasattr(msg, "tool_calls") and msg.tool_calls)
-                    ):
-                        answer = msg.content
-                        break
-
-            if not answer:
-                logger.warning(
-                    f"Agent 返回空回答, messages数: {len(result.get('messages', []))}"
-                )
-
-            return {
-                "answer": answer or "Agent 未能生成回答",
-                "intermediate_steps": intermediate_steps,
-                "total_duration": total_duration,
-                "thoughts": all_thoughts,
-            }
-
-        except ImportError as e:
-            logger.error(f"langchain 导入失败: {e}")
-            raise ValueError("请安装 langchain: pip install langchain")
-        except Exception as e:
-            logger.error(f"langchain Agent 执行异常: {e}", exc_info=True)
-            raise
 
     async def _get_llm(self, config: AgentConfig):
         """获取 LangChain LLM 实例"""

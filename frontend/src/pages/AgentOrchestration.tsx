@@ -1,9 +1,8 @@
 import React, { useState, useEffect } from 'react'
-import { Card, Button, message, Spin, Row, Col, Space, Breadcrumb, Switch, Input, Typography, Tag, List, Empty } from 'antd'
-import { SaveOutlined, SettingOutlined, CommentOutlined, PlusOutlined, DeleteOutlined, ToolOutlined, RobotOutlined } from '@ant-design/icons'
+import { Card, Button, message, Spin, Row, Col, Space, Breadcrumb, Switch, Input, InputNumber, Typography, Tag, List, Empty } from 'antd'
+import { SaveOutlined, SettingOutlined, CommentOutlined, PlusOutlined, DeleteOutlined, ToolOutlined, RobotOutlined, HistoryOutlined, SyncOutlined, FilterOutlined } from '@ant-design/icons'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import PromptEditor from '../components/PromptEditor'
-import VariableSettings from '../components/VariableSettings'
 import KnowledgeBaseSelector from '../components/KnowledgeBaseSelector'
 import ModelSelector from '../components/ModelSelector'
 import ModelParametersModal from '../components/ModelParameters'
@@ -28,7 +27,6 @@ const AgentOrchestration: React.FC = () => {
   const navigate = useNavigate()
   const [config, setConfig] = useState<AgentConfig>({
     prompt: { system_prompt: '' },
-    variables: [],
     model_parameters: defaultParameters,
     knowledge_bases: [],
     metadata_filter_enabled: false,
@@ -190,30 +188,11 @@ const AgentOrchestration: React.FC = () => {
           />
         </Card>
 
-        {/* 变量设置 */}
-        <Card title={
-          <Space>
-            <span>变量</span>
-            <Text type="secondary" style={{ fontSize: 12 }}>②</Text>
-          </Space>
-        } className="mb-4"
-          extra={
-            <Button type="link" icon={<PlusOutlined />} onClick={() => message.info('变量添加功能开发中')}>
-              添加
-            </Button>
-          }
-        >
-          <VariableSettings
-            variables={config.variables}
-            onChange={(variables) => setConfig({ ...config, variables })}
-          />
-        </Card>
-
         {/* 知识库设置 */}
         <Card title={
           <Space>
             <span>知识库</span>
-            <Text type="secondary" style={{ fontSize: 12 }}>③</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>②</Text>
           </Space>
         } className="mb-4"
           extra={
@@ -226,33 +205,36 @@ const AgentOrchestration: React.FC = () => {
             selected={config.knowledge_bases || []}
             onChange={(knowledge_bases) => setConfig({ ...config, knowledge_bases })}
           />
-        </Card>
-
-        {/* 元数据过滤 */}
-        <Card className="mb-4">
-          <Row justify="space-between" align="middle">
-            <Col>
-              <Space>
-                <span>元数据过滤</span>
-                <Text type="secondary" style={{ fontSize: 12 }}>④</Text>
-              </Space>
-            </Col>
-            <Col>
-              <Switch
-                checked={config.metadata_filter_enabled}
-                onChange={(checked) => setConfig({ ...config, metadata_filter_enabled: checked })}
-                checkedChildren="启用"
-                unCheckedChildren="禁用"
-              />
-            </Col>
-          </Row>
+          <div className="mt-3 pt-3" style={{ borderTop: '1px solid #f0f0f0' }}>
+            <Row justify="space-between" align="middle">
+              <Col>
+                <Space>
+                  <FilterOutlined style={{ color: '#fa8c16' }} />
+                  <span>元数据过滤</span>
+                </Space>
+                <div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    启用后查询时自动携带元数据过滤条件
+                  </Text>
+                </div>
+              </Col>
+              <Col>
+                <Switch
+                  checked={config.metadata_filter_enabled}
+                  onChange={(checked) => setConfig({ ...config, metadata_filter_enabled: checked })}
+                  checkedChildren="启用"
+                  unCheckedChildren="禁用"
+                />
+              </Col>
+            </Row>
+          </div>
         </Card>
 
         {/* 工具设置 */}
         <Card title={
           <Space>
             <span>工具</span>
-            <Text type="secondary" style={{ fontSize: 12 }}>⑤</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>③</Text>
           </Space>
         } className="mb-4"
           extra={
@@ -295,6 +277,75 @@ const AgentOrchestration: React.FC = () => {
                 </List.Item>
               )}
             />
+          )}
+          <div className="mt-3 pt-3" style={{ borderTop: '1px solid #f0f0f0' }}>
+            <Row justify="space-between" align="middle">
+              <Col>
+                <Space>
+                  <SyncOutlined style={{ color: '#1890ff' }} />
+                  <span>最大工具调用次数</span>
+                </Space>
+                <div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    Agent 单次对话最多执行的工具调用轮次，超过后停止
+                  </Text>
+                </div>
+              </Col>
+              <Col>
+                <Space>
+                  <InputNumber
+                    min={1}
+                    max={50}
+                    value={config.max_iterations}
+                    onChange={(val) => val && setConfig({ ...config, max_iterations: val })}
+                  />
+                  <Text type="secondary">次</Text>
+                </Space>
+              </Col>
+            </Row>
+          </div>
+        </Card>
+
+        {/* 对话记忆 */}
+        <Card title={
+          <Space>
+            <span>对话记忆</span>
+            <Text type="secondary" style={{ fontSize: 12 }}>③</Text>
+          </Space>
+        } className="mb-4">
+          <Row justify="space-between" align="middle" className="mb-3">
+            <Col>
+              <Space>
+                <HistoryOutlined style={{ color: config.memory_enabled ? '#1890ff' : '#999' }} />
+                <span>启用对话记忆</span>
+              </Space>
+            </Col>
+            <Col>
+              <Switch
+                checked={config.memory_enabled}
+                onChange={(checked) => setConfig({ ...config, memory_enabled: checked })}
+                checkedChildren="启用"
+                unCheckedChildren="禁用"
+              />
+            </Col>
+          </Row>
+          {config.memory_enabled && (
+            <Row align="middle" className="mt-2">
+              <Col span={6}>
+                <Text>记忆窗口长度</Text>
+              </Col>
+              <Col>
+                <Space>
+                  <InputNumber
+                    min={1}
+                    max={500}
+                    value={config.memory_window}
+                    onChange={(val) => val && setConfig({ ...config, memory_window: val })}
+                  />
+                  <Text type="secondary">条消息</Text>
+                </Space>
+              </Col>
+            </Row>
           )}
         </Card>
       </div>
