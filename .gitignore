@@ -21,7 +21,6 @@ venv
 ENV
 
 # IDE
-docs/
 docker/
 .vscode/
 .codebuddy/
