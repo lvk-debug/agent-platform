@@ -3,6 +3,7 @@
 首次启动时自动创建默认管理员、模型供应商、模型和工具
 """
 
+from datetime import UTC, datetime
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -10,6 +11,14 @@ from app.core.security import get_password_hash
 from app.models.user import User
 from app.models.model import ModelProvider, Model
 from app.models.tool import Tool
+from app.models.hermes import HermesSkill
+from app.models.support_business import (
+    ReturnCategory,
+    SupportOrder,
+    SupportProduct,
+    SupportReturnPolicy,
+    SupportShipment,
+)
 
 
 def seed_data(db: Session) -> None:
@@ -258,4 +267,104 @@ def seed_data(db: Session) -> None:
     else:
         print("[seed] 工具已存在，跳过")
 
+    # ========== 工作助理内置技能 ==========
+    if db.query(HermesSkill).count() == 0:
+        skills = [
+            HermesSkill(
+                name="通用问答",
+                slug="general-qa",
+                description="直接、简洁地回答各类问题，适合日常咨询与知识查询",
+                instruction="请使用简洁清晰的中文作答，先给结论再展开要点，避免冗长铺垫。",
+                icon="💬",
+                enabled=True,
+                sort_order=10,
+            ),
+            HermesSkill(
+                name="代码助手",
+                slug="coding",
+                description="编写、阅读与重构代码，输出可直接运行的完整示例",
+                instruction="请以资深工程师标准作答：给出完整可运行代码、关键注释与边界情况说明，必要时补充使用示例。",
+                icon="💻",
+                enabled=True,
+                sort_order=20,
+            ),
+            HermesSkill(
+                name="数据分析",
+                slug="data-analysis",
+                description="对数据做清洗、统计与可视化，输出结论与建议",
+                instruction="请先说明分析思路与口径，再给出计算过程、关键指标与可执行结论，数据不足时明确指出。",
+                icon="📊",
+                enabled=True,
+                sort_order=30,
+            ),
+            HermesSkill(
+                name="联网调研",
+                slug="web-research",
+                description="检索最新信息并交叉验证，标注信息来源",
+                instruction="请优先使用联网搜索获取最新信息，对结论给出来源链接，并区分事实与推测。",
+                icon="🔍",
+                enabled=True,
+                sort_order=40,
+            ),
+            HermesSkill(
+                name="文档写作",
+                slug="writing",
+                description="撰写报告、方案与邮件，结构清晰、语气得体",
+                instruction="请输出结构化文档：标题分级清晰，段落简短，必要时使用表格或要点列表，并控制语气专业克制。",
+                icon="📝",
+                enabled=True,
+                sort_order=50,
+            ),
+        ]
+        db.add_all(skills)
+        db.commit()
+        print(f"[seed] 创建 {len(skills)} 个工作助理内置技能")
+    else:
+        print("[seed] 工作助理技能已存在，跳过")
+
+    # 客服业务示例数据（订单/物流/商品/退换货政策）
+    seed_support_business(db)
+
     print("[seed] 数据库初始化完成")
+
+
+def seed_support_business(db: Session) -> None:
+    """初始化客服业务示例数据（订单/物流/商品/退换货政策），各表为空时才写入"""
+    if db.query(SupportOrder).count() == 0:
+        orders = [
+            SupportOrder(order_no="ORD-001", customer_name="张伟", product="智能蓝牙耳机 Pro", amount=299.00, status="shipped", ordered_at=datetime(2026, 5, 1, tzinfo=UTC)),
+            SupportOrder(order_no="ORD-002", customer_name="李娜", product="无线充电板", amount=89.00, status="processing", ordered_at=datetime(2026, 5, 5, tzinfo=UTC)),
+            SupportOrder(order_no="ORD-003", customer_name="王芳", product="机械键盘 K8", amount=459.00, status="delivered", ordered_at=datetime(2026, 4, 20, tzinfo=UTC)),
+        ]
+        db.add_all(orders)
+        db.commit()
+        print("[seed] 创建 3 条示例订单")
+
+    if db.query(SupportProduct).count() == 0:
+        products = [
+            SupportProduct(product_no="P001", name="智能蓝牙耳机 Pro", price=299.0, warranty="12 个月", category=ReturnCategory.ELECTRONICS, description="主动降噪、30 小时续航、IPX5 防水、蓝牙 5.3。", features=["降噪", "30 小时续航", "IPX5 防水", "蓝牙 5.3"]),
+            SupportProduct(product_no="P002", name="无线充电板", price=89.0, warranty="6 个月", category=ReturnCategory.ELECTRONICS, description="15W 快充、Qi 协议、LED 指示、过温保护。", features=["15W 快充", "Qi 协议", "LED 指示", "过温保护"]),
+            SupportProduct(product_no="P003", name="机械键盘 K8", price=459.0, warranty="12 个月", category=ReturnCategory.ELECTRONICS, description="87 键紧凑布局、热插拔轴体、RGB 背光、Type-C 接口。", features=["87 键", "热插拔", "RGB 背光", "Type-C"]),
+        ]
+        db.add_all(products)
+        db.commit()
+        print("[seed] 创建 3 条示例商品")
+
+    if db.query(SupportShipment).count() == 0:
+        shipments = [
+            SupportShipment(order_no="ORD-001", carrier="顺丰快递", tracking_no="SF1234567890", current_location="上海市分拣中心", estimated_text="明天", status="运输中"),
+            SupportShipment(order_no="ORD-002", carrier="中通快递", tracking_no="ZT9876543210", current_location="已出库", estimated_text="3 天后", status="待揽收"),
+        ]
+        db.add_all(shipments)
+        db.commit()
+        print("[seed] 创建 2 条示例物流")
+
+    if db.query(SupportReturnPolicy).count() == 0:
+        policies = [
+            SupportReturnPolicy(category=ReturnCategory.ELECTRONICS, category_label=ReturnCategory.LABELS[ReturnCategory.ELECTRONICS], policy_content="电子类产品支持签收后 7 天内无理由退货（需保持原包装、配件与说明书完整）；自收货起提供 12 个月质保，非人为损坏免费维修，人为损坏收取成本费。"),
+            SupportReturnPolicy(category=ReturnCategory.CLOTHING, category_label=ReturnCategory.LABELS[ReturnCategory.CLOTHING], policy_content="服装类在吊牌完整、未水洗未穿着的情况下支持 15 天内退换；尺码不合可免费换货一次，往返运费由买家承担。"),
+            SupportReturnPolicy(category=ReturnCategory.BOOKS, category_label=ReturnCategory.LABELS[ReturnCategory.BOOKS], policy_content="图书类除印刷/装订质量问题外不支持无理由退货；如收到破损、缺页可拍照申请换货，运费由商家承担。"),
+        ]
+        db.add_all(policies)
+        db.commit()
+        print("[seed] 创建 3 条示例退换货政策")

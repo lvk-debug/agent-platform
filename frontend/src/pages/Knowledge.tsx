@@ -27,7 +27,7 @@ import {
   DatabaseOutlined,
   DownOutlined,
 } from '@ant-design/icons'
-import { knowledgeApi, KnowledgeBaseData, CreateKnowledgeBaseData } from '../services/knowledge'
+import { knowledgeApi, KnowledgeBaseData, CreateKnowledgeBaseData } from '@/services/knowledge'
 
 const { Title, Text } = Typography
 const { Option } = Select

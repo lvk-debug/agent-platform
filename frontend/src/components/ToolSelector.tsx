@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react'
 import { Modal, Table, Button, Space, Tag, Input, message, Typography } from 'antd'
 import { SearchOutlined, ToolOutlined, CheckOutlined } from '@ant-design/icons'
-import { toolsApi, ToolData } from '../services/tools'
-import { ToolConfig } from '../services/agent'
+import { toolsApi, ToolData } from '@/services/tools'
+import { ToolConfig } from '@/services/agent'
 
 const { Text } = Typography
 

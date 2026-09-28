@@ -2,7 +2,7 @@
  * Agent API 服务 - 使用 LangGraph create_react_agent
  */
 import api from './api';
-import { useAuthStore } from '../stores/auth';
+import { useAuthStore } from '@/stores/auth';
 import {
   ChatbotVariable,
   KnowledgeBaseConfig,

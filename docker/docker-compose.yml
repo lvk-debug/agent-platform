@@ -18,15 +18,64 @@ services:
     build:
       context: ../backend
       dockerfile: Dockerfile
+      args:
+        # 安装 extras：qdrant 向量库客户端（sqlite 为默认本地后端，一并保留便于回切）
+        EXTRAS: postgres,qdrant,sqlite
     ports:
       - "8000:8000"
     environment:
       - DATABASE_URL=sqlite:///./agent_platform.db
       - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
       - LOG_LEVEL=INFO
+      # ---- 向量库：Qdrant ----
+      - VECTOR_STORE=qdrant_vector
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-agent_platform}
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      # ---- Embedding 模型（离线加载，目录 = 挂载进容器的模型缓存）----
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-fast-bge-small-zh-v1.5}
+      - EMBEDDING_SPARSE_MODEL=${EMBEDDING_SPARSE_MODEL:-Qdrant/bm25}
+      - EMBEDDING_MODEL_PATH=/app/models
+      - EMBEDDING_DIMENSION=512
     volumes:
       - backend-data:/app/data
       - upload-data:/app/uploads
+      # 模型缓存：把本机 backend/temp/fastembed_cache 的内容拷到 docker/model-cache/
+      - ./model-cache:/app/models:ro
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    networks:
+      - agent-network
+
+  # Qdrant 向量数据库
+  qdrant:
+    # 生产环境建议把 latest 固定成具体版本（如 qdrant/qdrant:v1.15.5），升级前先看官方 release note
+    image: qdrant/qdrant:latest
+    container_name: agent-qdrant
+    restart: unless-stopped
+    ports:
+      # 只监听回环地址，外部访问走 SSH 隧道或 Nginx；确认需要公网直连时再改成 "6333:6333"
+      - "127.0.0.1:6333:6333"   # REST / Dashboard
+      - "127.0.0.1:6334:6334"   # gRPC
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      # 留空 = 不鉴权（仅监听 127.0.0.1 时可用）；设了 key 后端必须配相同的 QDRANT_API_KEY
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:-}
+      - QDRANT__STORAGE__STORAGE_PATH=/qdrant/storage
+      - QDRANT__STORAGE__SNAPSHOTS_PATH=/qdrant/snapshots
+      - QDRANT__LOG_LEVEL=INFO
+    volumes:
+      - qdrant-data:/qdrant/storage
+      - qdrant-snapshots:/qdrant/snapshots
+    healthcheck:
+      # 官方推荐写法：不依赖镜像内是否装了 curl
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     networks:
       - agent-network
 
@@ -46,6 +95,8 @@ services:
 volumes:
   backend-data:
   upload-data:
+  qdrant-data:
+  qdrant-snapshots:
 
 networks:
   agent-network:

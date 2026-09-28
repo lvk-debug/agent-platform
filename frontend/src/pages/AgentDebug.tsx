@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { Card, Input, Button, Space, Typography, Tag, Spin, message, Divider, Timeline, Switch, Form, Select, Tooltip, Breadcrumb } from 'antd';
 import { SendOutlined, ClearOutlined, ExperimentOutlined, SettingOutlined, RocketOutlined, ReloadOutlined, InfoCircleOutlined, LinkOutlined } from '@ant-design/icons';
-import { agentApi } from '../services/agent';
+import { agentApi } from '@/services/agent';
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;

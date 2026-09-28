@@ -4,7 +4,7 @@
 import React, { useState } from 'react'
 import { Modal, Input, Upload, Button, message, Tabs } from 'antd'
 import { UploadOutlined, FileTextOutlined } from '@ant-design/icons'
-import { DSLData } from '../../services/workflow'
+import { DSLData } from '@/services/workflow'
 
 const { TextArea } = Input
 

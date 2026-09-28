@@ -13,7 +13,7 @@ import {
   FileTextOutlined,
   LinkOutlined,
 } from '@ant-design/icons';
-import { chatbotApi, ChatRequest } from '../services/chatbot';
+import { chatbotApi, ChatRequest } from '@/services/chatbot';
 
 const { Text } = Typography;
 const { TextArea } = Input;

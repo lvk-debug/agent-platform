@@ -18,8 +18,13 @@ import {
   LogoutOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  BarChartOutlined,
+  RobotOutlined,
+  ThunderboltOutlined,
+  ReadOutlined,
+  CustomerServiceOutlined,
 } from '@ant-design/icons'
-import { useAuthStore } from '../../stores/auth'
+import { useAuthStore } from '@/stores/auth'
 
 const { Sider, Content } = Layout
 const { Text } = Typography
@@ -31,6 +36,22 @@ const routeConfig: Record<string, { hasPadding?: boolean }> = {
   '/knowledge': { hasPadding: true },
   '/models': { hasPadding: true },
   '/tools': { hasPadding: true },
+  '/evaluation': { hasPadding: false },
+  '/learning': { hasPadding: true },
+  '/learning/records': { hasPadding: true },
+  '/learning/:id': { hasPadding: false },
+  // 智能客服：工作台自占满屏，其余页保留间距
+  '/support': { hasPadding: false },  '/support/tickets': { hasPadding: true },
+  '/support/analytics': { hasPadding: true },
+  '/support/settings': { hasPadding: true },
+  '/support/customers': { hasPadding: true },
+  '/evaluation/datasets': { hasPadding: false },
+  '/evaluation/tasks': { hasPadding: false },
+  '/evaluation/tasks/create': { hasPadding: false },
+  '/evaluation/tasks/:evalId': { hasPadding: false },
+  '/evaluation/tasks/:evalId/report': { hasPadding: false },
+  '/work-assistant': { hasPadding: false },
+  '/hermes-skills': { hasPadding: false },
   // 编排/调试/发布等页面无间距
   '/apps/:appId/chatbot': { hasPadding: false },
   '/apps/:appId/chatbot/debug': { hasPadding: false },
@@ -93,6 +114,30 @@ const MainLayout: React.FC = () => {
       key: '/tools',
       icon: <ToolOutlined />,
       label: '工具管理',
+    },
+    {
+      key: '/evaluation',
+      icon: <BarChartOutlined />,
+      label: '评估中心',
+    },
+    {
+      key: '/learning',
+      icon: <ReadOutlined />,
+      label: '学习助手',
+    },
+    {
+      key: '/support',
+      icon: <CustomerServiceOutlined />,
+      label: '智能客服',
+    },{
+      key: '/work-assistant',
+      icon: <RobotOutlined />,
+      label: '工作助理',
+    },
+    {
+      key: '/hermes-skills',
+      icon: <ThunderboltOutlined />,
+      label: '技能管理',
     },
   ]
 

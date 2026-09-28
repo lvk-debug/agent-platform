@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { Select, Space, Typography, Spin } from 'antd'
-import { modelsApi, ModelData } from '../services/models'
+import { modelsApi, ModelData } from '@/services/models'
 
 const { Text } = Typography
 

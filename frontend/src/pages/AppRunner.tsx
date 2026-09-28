@@ -10,8 +10,6 @@ import {
   message,
   Popconfirm,
   Collapse,
-  Tooltip,
-  List,
 } from 'antd';
 import {
   SendOutlined,
@@ -26,13 +24,13 @@ import {
   CloseCircleOutlined,
   LoadingOutlined,
   BookOutlined,
-  BulbOutlined,
   ToolOutlined,
   PaperClipOutlined,
 } from '@ant-design/icons';
-import { chatbotApi, ChatRequest } from '../services/chatbot';
-import { agentApi, AgentChatRequest } from '../services/agent';
-import { appsApi, AppData } from '../services/apps';
+import { chatbotApi, ChatRequest } from '@/services/chatbot';
+import { agentApi, AgentChatRequest } from '@/services/agent';
+import { appsApi, AppData } from '@/services/apps';
+import { workflowApi } from '@/services/workflow';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -497,6 +495,154 @@ const AppRunner: React.FC = () => {
           return finalSession;
         });
 
+      } else if (app.app_type === 'workflow') {
+        // 工作流流式运行
+        const assistantMsgId = (Date.now() + 1).toString();
+        const assistantMessage: ExtendedMessage = {
+          id: assistantMsgId,
+          role: 'assistant',
+          content: '',
+          timestamp: new Date(),
+          isStreaming: true,
+        };
+        const streamingMessages = [...updatedMessages, assistantMessage];
+        setCurrentSession({ ...updatedSession, messages: streamingMessages });
+
+        try {
+          const inputs: Record<string, any> = { user_message: query };
+
+          let llmOutput = '';
+          const executionLogs: Array<{node_id:string;type:string;status:string;duration_ms?:number;error?:string}> = [];
+          let currentNode = '';
+          let finalOutputs: Record<string, any> | null = null;
+          let duration: number | undefined;
+
+          const updateMessage = () => {
+            let content = '';
+
+            // 正在执行的节点提示
+            if (currentNode) {
+              content += `⏳ 正在执行: ${currentNode}\n\n`;
+            }
+
+            // LLM 输出
+            if (llmOutput) {
+              content += llmOutput;
+            }
+
+            // 执行日志
+            if (executionLogs.length > 0) {
+              content += '\n\n---\n**执行日志**\n' + executionLogs.map(l => {
+                const icon = l.status === 'done' ? '✅' : l.status === 'skipped' ? '⏭️' : '❌';
+                const dur = l.duration_ms != null ? ` (${l.duration_ms}ms)` : '';
+                const err = l.error ? ` - ${l.error}` : '';
+                return `${icon} ${l.node_id} [${l.type}]${dur}${err}`;
+              }).join('\n');
+            }
+
+            // 完成信息
+            if (duration != null) {
+              content += `\n总耗时: ${duration}ms`;
+            }
+
+            setCurrentSession(prev => {
+              if (!prev) return prev;
+              return {
+                ...prev,
+                messages: prev.messages.map(m =>
+                  m.id === assistantMsgId ? { ...m, content, isStreaming: true } : m
+                ),
+              };
+            });
+          };
+
+          for await (const event of workflowApi.runStream(Number(appId), { inputs })) {
+            switch (event.event) {
+              case 'node_start':
+                currentNode = `${event.data.node_id} [${event.data.type}]`;
+                updateMessage();
+                break;
+              case 'llm_token':
+                llmOutput += event.data.token;
+                updateMessage();
+                break;
+              case 'node_log':
+                executionLogs.push(event.data);
+                currentNode = '';
+                updateMessage();
+                break;
+              case 'done':
+                finalOutputs = event.data.outputs;
+                duration = event.data.duration;
+                // 补全执行日志
+                if (event.data.execution_log) {
+                  for (const log of event.data.execution_log) {
+                    if (!executionLogs.find(l => l.node_id === log.node_id && l.type === log.type)) {
+                      executionLogs.push(log);
+                    }
+                  }
+                }
+                updateMessage();
+                break;
+              case 'error':
+                throw new Error(event.data.message);
+            }
+          }
+
+          // 最终结果展示
+          let resultText = '';
+          if (finalOutputs && Object.keys(finalOutputs).length > 0) {
+            const parts = Object.entries(finalOutputs).map(([key, val]) =>
+              `**${key}**: ${typeof val === 'string' ? val : JSON.stringify(val, null, 2)}`
+            );
+            resultText = parts.join('\n\n');
+          }
+
+          // 如果没有 LLM 输出但有最终输出，显示最终输出
+          if (!llmOutput && resultText) {
+            llmOutput = resultText;
+          } else if (llmOutput && resultText && resultText !== llmOutput) {
+            // 如果有 LLM 输出也有其他输出字段，追加
+            llmOutput += '\n\n' + resultText;
+          }
+
+          // 构建最终消息内容
+          let finalContent = llmOutput || '工作流执行完成（无输出结果）';
+          if (executionLogs.length > 0) {
+            finalContent += '\n\n---\n**执行日志**\n' + executionLogs.map(l => {
+              const icon = l.status === 'done' ? '✅' : l.status === 'skipped' ? '⏭️' : '❌';
+              const dur = l.duration_ms != null ? ` (${l.duration_ms}ms)` : '';
+              const err = l.error ? ` - ${l.error}` : '';
+              return `${icon} ${l.node_id} [${l.type}]${dur}${err}`;
+            }).join('\n');
+          }
+          if (duration != null) {
+            finalContent += `\n总耗时: ${duration}ms`;
+          }
+
+          setCurrentSession(prev => {
+            if (!prev) return prev;
+            const finalMessages = prev.messages.map(m =>
+              m.id === assistantMsgId ? { ...m, content: finalContent, isStreaming: false } : m
+            );
+            const finalSession = {
+              ...prev,
+              messages: finalMessages,
+              title: prev.title.startsWith('会话') ? query.substring(0, 20) + (query.length > 20 ? '...' : '') : prev.title,
+            };
+            saveSessions(sessions.map(s => s.id === finalSession.id ? finalSession : s));
+            return finalSession;
+          });
+        } catch (err: any) {
+          const detail = err.message || '执行失败';
+          setCurrentSession(prev => ({
+            ...prev!,
+            messages: prev!.messages.map(m =>
+              m.id === assistantMsgId ? { ...m, content: `⚠️ 工作流执行失败: ${detail}`, isStreaming: false } : m
+            ),
+          }));
+        }
+
       } else {
         // 流式聊天助手调用
         const request: ChatRequest = {
@@ -613,6 +759,7 @@ const AppRunner: React.FC = () => {
   if (!app) return null;
 
   const isAgent = app.app_type === 'agent';
+  const isWorkflow = app.app_type === 'workflow';
 
   return (
     <div className="flex bg-page overflow-hidden" style={{ height: 'calc(100vh - 32px)' }}>
@@ -692,8 +839,8 @@ const AppRunner: React.FC = () => {
             <Typography.Text strong className="text-base">
               {app.name}
             </Typography.Text>
-            <Tag color={isAgent ? 'blue' : 'green'} className="!ml-0">
-              {isAgent ? 'Agent' : '聊天助手'}
+            <Tag color={isAgent ? 'blue' : isWorkflow ? 'purple' : 'green'} className="!ml-0">
+              {isAgent ? 'Agent' : isWorkflow ? '工作流' : '聊天助手'}
             </Tag>
           </div>
           <div className="flex items-center gap-1">
@@ -706,7 +853,7 @@ const AppRunner: React.FC = () => {
               type="text"
               icon={<SettingOutlined />}
               size="small"
-              onClick={() => navigate(`/apps/${appId}/${isAgent ? 'agent' : 'chatbot'}`)}
+              onClick={() => navigate(`/apps/${appId}/${isAgent ? 'agent' : isWorkflow ? 'workflow' : 'chatbot'}`)}
             />
           </div>
         </div>

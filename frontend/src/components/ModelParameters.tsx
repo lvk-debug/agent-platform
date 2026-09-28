@@ -1,7 +1,7 @@
 import React from 'react'
 import { Modal, Form, InputNumber, Slider, Switch, Space, Tooltip } from 'antd'
 import { QuestionCircleOutlined } from '@ant-design/icons'
-import { ModelParameters as ModelParametersType } from '../services/chatbot'
+import { ModelParameters as ModelParametersType } from '@/services/chatbot'
 
 interface ModelParametersProps {
   open: boolean

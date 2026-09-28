@@ -27,6 +27,14 @@ dependencies = [
     "langchain-community>=0.0.10",
     "langchain-core>=0.1.10",
     "langgraph>=0.1.0",
+    "apscheduler>=3.10.4",
+    "arxiv>=2.1.0",
+    # ---- 学习助手（Learning） ----
+    "yt-dlp>=2024.8.6",       # YouTube / B站 元数据与字幕抓取（需频繁升级以应对反爬）
+    "pypdf>=4.3.1",           # PDF 页数与书签大纲
+    "python-pptx>=0.6.23",    # PPTX 逐 slide 结构化抽取
+    "ebooklib>=0.18",         # EPUB 按 spine 拆章节
+    "Pillow>=10.3.0",         # 画布导出图压缩
 ]
 
 [project.optional-dependencies]
@@ -48,6 +56,13 @@ postgres = [
 ]
 qdrant = [
     "qdrant-client>=1.7.0",
+]
+evaluation = [
+    "datasets>=2.14.0",
+]
+# Paper Agent 的 DeepEval 评测（依赖较重，按需安装）
+paper-eval = [
+    "deepeval>=2.0.0",
 ]
 
 [build-system]

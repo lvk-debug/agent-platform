@@ -511,7 +511,11 @@ class QdrantStoreService(VectorStoreBase):
             if not url:
                 raise ValueError("QDRANT_URL 未配置")
 
-            self._client = QdrantClient(url=url, timeout=30)
+            self._client = QdrantClient(
+                url=url,
+                api_key=settings.QDRANT_API_KEY or None,
+                timeout=30,
+            )
             logger.info("Qdrant 客户端已连接: %s", url)
         return self._client
 
@@ -597,6 +601,16 @@ class QdrantStoreService(VectorStoreBase):
                         dimension,
                     )
 
+                # kb_id 过滤每次检索都要走，建 keyword 索引避免全量扫描
+                try:
+                    self.client.create_payload_index(
+                        collection_name=collection_name,
+                        field_name="kb_id",
+                        field_schema=rest.PayloadSchemaType.KEYWORD,
+                    )
+                except Exception as idx_err:  # 索引已存在时会报冲突，忽略即可
+                    logger.debug("kb_id payload 索引跳过: %s", idx_err)
+
                 self._collections_cache.add(collection_name)
             except Exception as e:
                 logger.error("Qdrant collection 检查失败: %s", e)
@@ -664,7 +678,8 @@ class QdrantStoreService(VectorStoreBase):
         ):
             payload = {
                 "content": text,
-                "kb_id": kb_id,
+                # 统一存字符串：过滤条件用 MatchValue(str) 匹配
+                "kb_id": str(kb_id),
                 **metadata,
             }
             points.append(
@@ -885,7 +900,7 @@ class QdrantStoreService(VectorStoreBase):
             conditions = [
                 rest.FieldCondition(
                     key="kb_id",
-                    match=rest.MatchValue(value=kb_id),
+                    match=rest.MatchValue(value=str(kb_id)),
                 ),
                 rest.FieldCondition(
                     key=filter_key,

@@ -46,7 +46,7 @@ import {
   ToolTemplate,
   ToolCategory,
   ToolTestResult,
-} from '../services/tools'
+} from '@/services/tools'
 
 const { Title, Text, Paragraph } = Typography
 const { Option } = Select

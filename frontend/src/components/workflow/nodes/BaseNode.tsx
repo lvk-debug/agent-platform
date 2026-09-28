@@ -2,8 +2,8 @@
  * 通用节点基础组件 — 所有自定义节点共用的外壳
  * Dify 风格：白色卡片 + 左侧彩色图标 + 右侧带标签的连接点
  */
-import React, { memo } from 'react'
-import { Handle, Position } from 'reactflow'
+import React, { memo, useState, useCallback, useEffect, useRef } from 'react'
+import { Handle, Position, useReactFlow } from 'reactflow'
 import {
   PlayCircleOutlined,
   StopOutlined,
@@ -73,6 +73,7 @@ const TALL_MIN_HEIGHT = 100
 const BaseNode: React.FC<BaseNodeProps> = ({
   data,
   selected,
+  id,
   sourceHandles,
   targetHandles,
   showSource = true,
@@ -81,6 +82,38 @@ const BaseNode: React.FC<BaseNodeProps> = ({
   const color = colorMap[data.nodeType] || '#595959'
   const icon = iconMap[data.nodeType] || <ToolOutlined />
   const needsTall = TALL_TYPES.has(data.nodeType)
+
+  // 节点名称内联编辑
+  const [isEditing, setIsEditing] = useState(false)
+  const [editValue, setEditValue] = useState(data.label || '')
+  const inputRef = useRef<HTMLInputElement>(null)
+  const { updateNodeData } = useReactFlow()
+
+  useEffect(() => {
+    setEditValue(data.label || '')
+  }, [data.label])
+
+  useEffect(() => {
+    if (isEditing && inputRef.current) {
+      inputRef.current.focus()
+      inputRef.current.select()
+    }
+  }, [isEditing])
+
+  const handleDoubleClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation()
+    setIsEditing(true)
+  }, [])
+
+  const commitEdit = useCallback(() => {
+    const trimmed = editValue.trim()
+    if (trimmed && trimmed !== data.label) {
+      updateNodeData(id, { label: trimmed })
+    } else {
+      setEditValue(data.label || '')
+    }
+    setIsEditing(false)
+  }, [editValue, data.label, id, updateNodeData])
 
   // 标准化 sourceHandles
   const normalizedHandles: HandleLabel[] = (sourceHandles || []).map((h) => {
@@ -105,10 +138,41 @@ const BaseNode: React.FC<BaseNodeProps> = ({
         >
           {icon}
         </div>
-        {/* 节点名称 */}
-        <span className="text-sm font-medium text-gray-800 truncate">
-          {data.label || data.nodeType}
-        </span>
+        <div className="flex flex-col min-w-0">
+          {/* 节点名称 — 双击可编辑 */}
+          {isEditing ? (
+            <input
+              ref={inputRef}
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              onBlur={commitEdit}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commitEdit()
+                if (e.key === 'Escape') {
+                  setEditValue(data.label || '')
+                  setIsEditing(false)
+                }
+              }}
+              onClick={(e) => e.stopPropagation()}
+              className="text-sm font-medium text-gray-800 border border-blue-400 rounded px-1 outline-none"
+              style={{ minWidth: 60, maxWidth: 160 }}
+            />
+          ) : (
+            <span
+              className="text-sm font-medium text-gray-800 truncate cursor-text"
+              onDoubleClick={handleDoubleClick}
+              title="双击编辑名称"
+            >
+              {data.label || data.nodeType}
+            </span>
+          )}
+          {/* 节点描述 */}
+          {data.description && (
+            <span className="text-xs text-gray-500 truncate">
+              {data.description}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* 连接点 — 左侧 target */}

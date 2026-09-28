@@ -198,8 +198,9 @@ class LLMService:
                     if not choices:
                         continue
                     delta = choices[0].get("delta", {})
-                    if "content" in delta:
-                        yield delta["content"]
+                    content = delta.get("content")
+                    if isinstance(content, str) and content:
+                        yield content
 
     async def _anthropic_chat(
         self,
@@ -303,6 +304,175 @@ class LLMService:
                     data = json.loads(line)
                     if data["type"] == "content_block_delta":
                         yield data["delta"]["text"]
+
+
+    async def chat_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        model: str = "gpt-3.5-turbo",
+        provider: str = "openai",
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        tool_choice: str = "auto",
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """带工具调用的对话（Function Calling）
+
+        用于客服 Tool Agent 等需要模型自主选择并调用工具的场景。
+        tools 为 OpenAI 格式：[{type:"function", function:{name, description, parameters}}]。
+        返回统一结构：{content, tool_calls:[{id, name, arguments}], model, tokens_used, finish_reason}。
+        tool_calls 为空表示模型本轮未选择任何工具。
+        """
+        provider_config = self.providers.get(provider)
+        if not provider_config:
+            raise ValueError(f"未找到供应商配置: {provider}")
+
+        try:
+            if provider == "openai":
+                return await self._openai_chat_with_tools(
+                    messages, tools, model, provider_config,
+                    temperature, max_tokens, tool_choice, **kwargs,
+                )
+            elif provider == "anthropic":
+                return await self._anthropic_chat_with_tools(
+                    messages, tools, model, provider_config,
+                    temperature, max_tokens, tool_choice, **kwargs,
+                )
+            else:
+                raise ValueError(f"不支持的供应商: {provider}")
+        except Exception as e:
+            logger.error(f"LLM 工具调用失败: {e}")
+            raise
+
+    async def _openai_chat_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        model: str,
+        config: Dict[str, Any],
+        temperature: float,
+        max_tokens: int,
+        tool_choice: str,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        api_endpoint = config.get("api_endpoint", "https://api.openai.com/v1")
+        api_key = config.get("api_key")
+        payload = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            **kwargs,
+        }
+        response = await _http_client.post(
+            f"{api_endpoint}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+        msg = data["choices"][0]["message"]
+        content = msg.get("content") or ""
+        tool_calls: List[Dict[str, Any]] = []
+        for tc in msg.get("tool_calls") or []:
+            if tc.get("type") != "function":
+                continue
+            try:
+                args = json.loads(tc["function"].get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            tool_calls.append(
+                {"id": tc.get("id"), "name": tc["function"]["name"], "arguments": args}
+            )
+        return {
+            "content": content,
+            "tool_calls": tool_calls,
+            "model": data.get("model"),
+            "tokens_used": data.get("usage", {}),
+            "finish_reason": data["choices"][0].get("finish_reason"),
+        }
+
+    async def _anthropic_chat_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        model: str,
+        config: Dict[str, Any],
+        temperature: float,
+        max_tokens: int,
+        tool_choice: str,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        api_endpoint = config.get("api_endpoint", "https://api.anthropic.com")
+        api_key = config.get("api_key")
+
+        # OpenAI 工具格式 → Anthropic 工具格式
+        anthropic_tools = [
+            {
+                "name": t["function"]["name"],
+                "description": t["function"].get("description", ""),
+                "input_schema": t["function"].get("parameters", {"type": "object"}),
+            }
+            for t in tools
+        ]
+
+        system_message = None
+        formatted_messages = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system_message = msg["content"]
+            else:
+                formatted_messages.append(msg)
+
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "system": system_message or "",
+            "messages": formatted_messages,
+            "tools": anthropic_tools,
+            **kwargs,
+        }
+        response = await _http_client.post(
+            f"{api_endpoint}/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+        content = ""
+        tool_calls: List[Dict[str, Any]] = []
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                content += block.get("text", "")
+            elif block.get("type") == "tool_use":
+                tool_calls.append(
+                    {
+                        "id": block.get("id"),
+                        "name": block.get("name"),
+                        "arguments": block.get("input", {}) or {},
+                    }
+                )
+        return {
+            "content": content,
+            "tool_calls": tool_calls,
+            "model": data.get("model"),
+            "tokens_used": {
+                "prompt_tokens": data.get("usage", {}).get("input_tokens", 0),
+                "completion_tokens": data.get("usage", {}).get("output_tokens", 0),
+            },
+            "finish_reason": data.get("stop_reason"),
+        }
 
 
 # 创建全局LLM服务实例

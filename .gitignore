@@ -21,7 +21,10 @@ venv
 ENV
 
 # IDE
+docs/
+docker/
 .vscode/
+.codebuddy/
 .idea/
 *.swp
 *.swo
@@ -37,8 +40,11 @@ Thumbs.db
 backend/*.db
 backend/*.db-shm
 backend/*.db-wal
+backend/data/
+backend/*.bin
 backend/uploads/
 backend/temp/
+backend/outputs/
 backend/logs/
 backend/data/
 backend/.env
@@ -51,6 +57,8 @@ frontend/dist/
 frontend/.env
 frontend/.env.local
 frontend/.env.*.local
+
+mobile/
 
 # Docker
 docker/.env
@@ -79,3 +87,6 @@ coverage.xml
 *.sqlite3
 *.db
 *.db-journal
+
+# DeepEval 本地缓存
+.deepeval/

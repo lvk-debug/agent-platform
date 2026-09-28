@@ -3,10 +3,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.config import settings
-from app.core.database import engine, Base, SessionLocal
-from app.core.seed import seed_data
 from app.api.api import api_router
+from app.core.config import settings
+from app.core.database import Base, SessionLocal, engine, ensure_light_migrations
+from app.core.seed import seed_data
+from app.services.scheduled_task_service import bootstrap_scheduled_jobs
+from app.services.scheduler import shutdown_scheduler, start_scheduler
 
 
 @asynccontextmanager
@@ -17,6 +19,9 @@ async def lifespan(app: FastAPI):
     # 启动时创建表
     Base.metadata.create_all(bind=engine)
 
+    # 旧库补充新增列（幂等，未执行 alembic 迁移时的兜底）
+    ensure_light_migrations()
+
     # 初始化默认数据
     db = SessionLocal()
     try:
@@ -24,10 +29,17 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    # 启动定时任务调度器（内部把数据库中已启用的任务注册进 APScheduler）
+    start_scheduler(bootstrap=bootstrap_scheduled_jobs)
+
     yield
+
+    # 关闭调度器（不等待正在执行的任务，避免阻塞退出）
+    shutdown_scheduler()
 
     # 关闭时释放 LLM HTTP 连接池
     from app.services.llm import close_http_client
+
     await close_http_client()
 
 

@@ -21,7 +21,7 @@ import {
   ApiOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
-import { modelsApi, ModelProviderData, CreateModelProviderData } from '../services/models'
+import { modelsApi, ModelProviderData, CreateModelProviderData } from '@/services/models'
 
 const { Title, Text } = Typography
 const { Option } = Select

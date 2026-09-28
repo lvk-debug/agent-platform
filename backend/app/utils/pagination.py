@@ -35,3 +35,36 @@ def apply_cursor_pagination(
     next_cursor = items[-1].id if has_more and items else None
 
     return items, next_cursor, has_more
+
+
+def apply_desc_cursor_pagination(
+    query: Query,
+    model: Type,
+    cursor: Optional[int] = None,
+    limit: int = 20,
+) -> Tuple[list, Optional[int], bool]:
+    """
+    降序游标分页：WHERE id < cursor ORDER BY id DESC LIMIT limit+1
+
+    与 apply_cursor_pagination 互补，用于「最近添加 / 最近学习」这类倒序列表。
+    前提是列表的主排序键与自增 id 单调同向（学习资源、笔记均满足）。
+
+    Args:
+        query: SQLAlchemy 查询对象（已包含过滤条件）
+        model: ORM 模型类（用于获取 id 列）
+        cursor: 上一页最后一条记录的 ID，None 表示第一页
+        limit: 每页数量
+
+    Returns:
+        (items, next_cursor, has_more)
+    """
+    if cursor is not None:
+        query = query.filter(model.id < cursor)
+
+    results = query.order_by(model.id.desc()).limit(limit + 1).all()
+
+    has_more = len(results) > limit
+    items = results[:limit]
+    next_cursor = items[-1].id if has_more and items else None
+
+    return items, next_cursor, has_more

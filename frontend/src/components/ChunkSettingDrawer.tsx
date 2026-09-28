@@ -27,7 +27,7 @@ import {
   knowledgeApi,
   DocumentData,
   ChunkPreviewItem,
-} from '../services/knowledge'
+} from '@/services/knowledge'
 
 const { Text, Paragraph } = Typography
 

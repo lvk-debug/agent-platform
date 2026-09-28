@@ -19,11 +19,16 @@ from app.services.llm import LLMService
 from app.services.tool_registry import ToolRegistry
 from app.utils.logger import logger
 from langchain.agents import create_agent, AgentState
-from langchain.agents.middleware import after_model
+from langchain.agents.middleware import (
+    after_model,
+    ToolCallLimitMiddleware,
+    TodoListMiddleware,
+)
 from langgraph.runtime import Runtime
 from langchain.messages import RemoveMessage
 
 MAX_MESSAGES = 4  # 默认值，实际使用时从 config.memory_window 读取
+MAX_TOOL_CALLS = 3  # 默认值，实际使用时从 config.max_tool_calls 读取
 
 
 def make_delete_old_messages(max_messages: int = MAX_MESSAGES):
@@ -212,7 +217,11 @@ class AgentService:
         agent = create_agent(
             model=llm,
             tools=tools,
-            middleware=[delete_middleware],
+            middleware=[
+                delete_middleware,
+                ToolCallLimitMiddleware(thread_limit=10, run_limit=10),
+                TodoListMiddleware(),
+            ],
             system_prompt=system_prompt or "你是一个有用的AI助手。",
             checkpointer=checkpointer,
         )
@@ -426,7 +435,9 @@ class AgentService:
             # 根据配置决定是否创建 checkpointer
             async def _run_agent_events(agent, agent_config, inputs):
                 nonlocal final_answer, streamed_any
-                async for event in agent.astream_events(inputs, config=agent_config, version="v2"):
+                async for event in agent.astream_events(
+                    inputs, config=agent_config, version="v2"
+                ):
                     kind = event.get("event", "")
                     evt_data = event.get("data", {})
 
@@ -516,14 +527,20 @@ class AgentService:
             if config.memory_enabled:
                 async with _get_checkpointer() as checkpointer:
                     agent, agent_config, inputs, _ = await self._build_agent(
-                        config, query, context_text, conversation_id,
+                        config,
+                        query,
+                        context_text,
+                        conversation_id,
                         checkpointer=checkpointer,
                     )
                     async for event in _run_agent_events(agent, agent_config, inputs):
                         yield event
             else:
                 agent, agent_config, inputs, _ = await self._build_agent(
-                    config, query, context_text, conversation_id,
+                    config,
+                    query,
+                    context_text,
+                    conversation_id,
                 )
                 async for event in _run_agent_events(agent, agent_config, inputs):
                     yield event

@@ -13,7 +13,7 @@ import {
   GlobalOutlined,
   ToolOutlined,
 } from '@ant-design/icons'
-import { NODE_TYPES, NodeType } from '../../services/workflow'
+import { NODE_TYPES, NodeType } from '@/services/workflow'
 
 const { Text } = Typography
 

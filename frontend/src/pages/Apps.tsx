@@ -33,7 +33,7 @@ import {
   RocketOutlined,
   FileTextOutlined,
 } from '@ant-design/icons'
-import { appsApi, AppData, CreateAppData } from '../services/apps'
+import { appsApi, AppData, CreateAppData } from '@/services/apps'
 
 const { Title, Text } = Typography
 const { Option } = Select
@@ -76,7 +76,10 @@ const Apps: React.FC = () => {
   const [status, setStatus] = useState<string | undefined>(undefined)
   const [searchText, setSearchText] = useState('')
   const [createModalVisible, setCreateModalVisible] = useState(false)
+  const [editModalVisible, setEditModalVisible] = useState(false)
+  const [editingApp, setEditingApp] = useState<AppData | null>(null)
   const [createForm] = Form.useForm()
+  const [editForm] = Form.useForm()
   const { message } = App.useApp()
 
   // 运行日志相关状态
@@ -152,6 +155,34 @@ const Apps: React.FC = () => {
       setApps((prev) => prev.filter((app) => app.id !== id))
     } catch (error) {
       message.error('删除应用失败')
+    }
+  }
+
+  // 打开编辑弹窗
+  const handleEdit = (app: AppData) => {
+    setEditingApp(app)
+    editForm.setFieldsValue({
+      name: app.name,
+      description: app.description || '',
+    })
+    setEditModalVisible(true)
+  }
+
+  // 提交编辑
+  const handleUpdate = async (values: { name: string; description?: string }) => {
+    if (!editingApp) return
+    try {
+      await appsApi.updateApp(editingApp.id, values)
+      message.success('应用信息已更新')
+      setEditModalVisible(false)
+      setEditingApp(null)
+      editForm.resetFields()
+      // 刷新列表
+      setApps([])
+      setNextCursor(null)
+      fetchApps(true)
+    } catch (error) {
+      message.error('更新应用失败')
     }
   }
 
@@ -272,6 +303,13 @@ const Apps: React.FC = () => {
           <Tag color={getAppTypeColor(record.app_type)}>
             {getAppTypeName(record.app_type)}
           </Tag>
+          <Button
+            type="text"
+            size="small"
+            icon={<EditOutlined />}
+            onClick={() => handleEdit(record)}
+            style={{ color: '#1677ff' }}
+          />
         </Space>
       ),
     },
@@ -325,7 +363,7 @@ const Apps: React.FC = () => {
               }
             }}
           >
-            编辑
+            编排
           </Button>
           {record.status === 'published' && (
             <Button
@@ -718,6 +756,53 @@ const Apps: React.FC = () => {
                 onClick={() => {
                   setCreateModalVisible(false)
                   createForm.resetFields()
+                }}
+              >
+                取消
+              </Button>
+            </Space>
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 编辑应用信息弹窗 */}
+      <Modal
+        title="编辑应用信息"
+        open={editModalVisible}
+        onCancel={() => {
+          setEditModalVisible(false)
+          setEditingApp(null)
+          editForm.resetFields()
+        }}
+        footer={null}
+      >
+        <Form
+          form={editForm}
+          layout="vertical"
+          onFinish={handleUpdate}
+        >
+          <Form.Item
+            name="name"
+            label="应用名称"
+            rules={[{ required: true, message: '请输入应用名称' }]}
+          >
+            <Input placeholder="请输入应用名称" />
+          </Form.Item>
+
+          <Form.Item name="description" label="描述">
+            <Input.TextArea rows={4} placeholder="请输入应用描述" />
+          </Form.Item>
+
+          <Form.Item>
+            <Space>
+              <Button type="primary" htmlType="submit">
+                保存
+              </Button>
+              <Button
+                onClick={() => {
+                  setEditModalVisible(false)
+                  setEditingApp(null)
+                  editForm.resetFields()
                 }}
               >
                 取消

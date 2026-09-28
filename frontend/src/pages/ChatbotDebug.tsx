@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react'
 import { Spin, Row, Col, Breadcrumb } from 'antd'
 import { useParams, useNavigate, Link } from 'react-router-dom'
-import ChatPreview from '../components/ChatPreview'
-import { chatbotApi, ChatbotConfig } from '../services/chatbot'
+import ChatPreview from '@/components/ChatPreview'
+import { chatbotApi, ChatbotConfig } from '@/services/chatbot'
 
 const ChatbotDebug: React.FC = () => {
   const { appId } = useParams<{ appId: string }>()

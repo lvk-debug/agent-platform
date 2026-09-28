@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { Card, Input, Button, List, Tag, Typography, Empty, Spin, Space, Segmented, Switch, Tooltip } from 'antd'
 import { SearchOutlined, FileTextOutlined, SortAscendingOutlined } from '@ant-design/icons'
-import { knowledgeApi, SearchResultItem, SearchMode } from '../services/knowledge'
+import { knowledgeApi, SearchResultItem, SearchMode } from '@/services/knowledge'
 
 const { Text, Paragraph } = Typography
 

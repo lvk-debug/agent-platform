@@ -413,13 +413,27 @@ async def retry_document(
 
     # 清除旧的分段
     db.query(DocumentSegment).filter(DocumentSegment.document_id == doc_id).delete()
+
+    if not document.file_path and document.content:
+        # 纯内容型文档（无源文件，content 即正文，如客服知识库自动生成文档）：
+        # 直接重新分片 + 向量化，切勿清空 content，否则 parse_document 会因
+        # 「既无 file_path 又无 content」而报「缺少文件路径且文档内容为空」。
+        document.status = "pending"
+        document.error_message = None
+        document.chunk_count = 0
+        db.commit()
+        background_tasks.add_task(
+            _process_document_task, doc_id, "sliding_window", 500, 50, None
+        )
+        return {"message": "文档已加入重新处理队列"}
+
     document.status = "pending"
     document.error_message = None
     document.chunk_count = 0
     document.content = None
     db.commit()
 
-    # 后台重新解析
+    # 后台重新解析（有源文件的文档从文件重新读取）
     background_tasks.add_task(_parse_document_task, doc_id)
 
     return {"message": "文档已加入重新解析队列"}

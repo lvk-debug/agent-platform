@@ -18,8 +18,8 @@ import {
   Tag,
 } from 'antd';
 import { PlusOutlined, DeleteOutlined, SettingOutlined } from '@ant-design/icons';
-import { KnowledgeBaseConfig } from '../services/chatbot';
-import { knowledgeApi, KnowledgeBaseData } from '../services/knowledge';
+import { KnowledgeBaseConfig } from '@/services/chatbot';
+import { knowledgeApi, KnowledgeBaseData } from '@/services/knowledge';
 
 const { Text, Link } = Typography;
 

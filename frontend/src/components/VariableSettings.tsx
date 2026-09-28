@@ -9,7 +9,7 @@ import {
   FontSizeOutlined, AlignLeftOutlined, DownSquareOutlined,
   NumberOutlined, CheckSquareOutlined, ApiOutlined,
 } from '@ant-design/icons';
-import { ChatbotVariable, VariableType } from '../services/chatbot';
+import { ChatbotVariable, VariableType } from '@/services/chatbot';
 
 const { Text } = Typography;
 

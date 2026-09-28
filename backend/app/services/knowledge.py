@@ -11,6 +11,7 @@ from app.utils.logger import logger
 from app.core.config import settings
 from app.services.vector_store import get_vector_store_service
 from app.services.reranker import get_reranker_service
+from app.utils.file_parser import convert_to_markdown
 
 
 class KnowledgeService:
@@ -48,9 +49,21 @@ class KnowledgeService:
             self.db.commit()
 
             # 1. 解析文档为 Markdown
-            markdown_text = await self._convert_to_markdown(
-                document.file_path, document.file_type
-            )
+            if document.file_path:
+                markdown_text = await self._convert_to_markdown(
+                    document.file_path, document.file_type
+                )
+            elif document.content and document.file_type in (
+                "txt",
+                "markdown",
+                "md",
+                "html",
+            ):
+                # 内容已为文本/Markdown（如直存内容、爬虫结果等），无需 markitdown
+                markdown_text = document.content
+            else:
+                raise ValueError("缺少文件路径且文档内容为空，无法解析")
+
             if not markdown_text or not markdown_text.strip():
                 raise ValueError("文档解析结果为空")
 
@@ -206,121 +219,10 @@ class KnowledgeService:
     async def _convert_to_markdown(self, file_path: str, file_type: str) -> str:
         """
         使用 markitdown 将各种格式统一转为 Markdown
+
+        实现已抽取到 app/utils/file_parser.py，会话附件链路复用同一份逻辑。
         """
-        # 对 HTML 文件先做主体提取预处理
-        if file_type == "html":
-            file_path = self._preprocess_html(file_path)
-
-        try:
-            from markitdown import MarkItDown
-
-            converter = MarkItDown()
-            result = converter.convert(file_path)
-            return (
-                result.text_content if hasattr(result, "text_content") else str(result)
-            )
-        except ImportError:
-            logger.warning("markitdown 未安装，使用 fallback 解析")
-            return await self._fallback_parse(file_path, file_type)
-        except Exception as e:
-            logger.warning(f"markitdown 转换失败: {e}，使用 fallback 解析")
-            return await self._fallback_parse(file_path, file_type)
-
-    def _preprocess_html(self, file_path: str) -> str:
-        """
-        HTML 预处理：用 BeautifulSoup 提取主体内容，移除导航/页脚/广告
-        """
-        try:
-            from bs4 import BeautifulSoup
-
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                soup = BeautifulSoup(f.read(), "html.parser")
-
-            # 移除非内容标签
-            for tag in soup.find_all(
-                ["nav", "footer", "header", "aside", "script", "style"]
-            ):
-                tag.decompose()
-
-            # 尝试提取主体内容
-            main = (
-                soup.find("main")
-                or soup.find("article")
-                or soup.find("div", class_="content")
-            )
-            if main:
-                content = str(main)
-            else:
-                content = str(soup)
-
-            # 写入临时文件
-            temp_path = file_path + ".cleaned.html"
-            with open(temp_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            return temp_path
-        except ImportError:
-            return file_path
-        except Exception as e:
-            logger.warning(f"HTML 预处理失败: {e}")
-            return file_path
-
-    async def _fallback_parse(self, file_path: str, file_type: str) -> str:
-        """
-        markitdown 不可用时的 fallback 解析
-        """
-        if file_type == "txt" or file_type == "markdown":
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                return f.read()
-
-        if file_type == "html":
-            try:
-                from bs4 import BeautifulSoup
-
-                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    soup = BeautifulSoup(f.read(), "html.parser")
-                return soup.get_text(separator="\n", strip=True)
-            except ImportError:
-                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    return f.read()
-
-        if file_type == "pdf":
-            try:
-                import PyPDF2
-
-                with open(file_path, "rb") as f:
-                    reader = PyPDF2.PdfReader(f)
-                    text = ""
-                    for page in reader.pages:
-                        text += page.extract_text() + "\n"
-                    return text
-            except ImportError:
-                logger.warning("PyPDF2 未安装，无法解析 PDF")
-                return ""
-
-        if file_type == "docx":
-            try:
-                from docx import Document as DocxDocument
-
-                doc = DocxDocument(file_path)
-                text = ""
-                for para in doc.paragraphs:
-                    text += para.text + "\n"
-                return text
-            except ImportError:
-                logger.warning("python-docx 未安装，无法解析 Word 文档")
-                return ""
-
-        if file_type == "excel":
-            try:
-                import pandas as pd
-
-                df = pd.read_excel(file_path)
-                return df.to_markdown(index=False)
-            except ImportError:
-                logger.warning("pandas 未安装，无法解析 Excel")
-                return ""
-
-        raise ValueError(f"不支持的文件类型: {file_type}")
+        return await convert_to_markdown(file_path, file_type)
 
     # ------------------------------------------------------------------
     # Markdown 后处理清理

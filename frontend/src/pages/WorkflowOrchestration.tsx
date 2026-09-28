@@ -17,7 +17,7 @@ import ReactFlow, {
   MarkerType,
 } from 'reactflow'
 import 'reactflow/dist/style.css'
-import { Button, Space, Breadcrumb, message, Spin, Modal, Input } from 'antd'
+import { Button, Space, Breadcrumb, message, Spin } from 'antd'
 import {
   SaveOutlined,
   ExportOutlined,
@@ -26,19 +26,20 @@ import {
 } from '@ant-design/icons'
 import { useParams, Link } from 'react-router-dom'
 
-import NodePanel from '../components/workflow/NodePanel'
-import NodeConfigDrawer from '../components/workflow/NodeConfigDrawer'
-import DSLImportModal from '../components/workflow/DSLImportModal'
-import StartNode from '../components/workflow/nodes/StartNode'
-import EndNode from '../components/workflow/nodes/EndNode'
-import LLMNode from '../components/workflow/nodes/LLMNode'
-import KnowledgeNode from '../components/workflow/nodes/KnowledgeNode'
-import ConditionNode from '../components/workflow/nodes/ConditionNode'
-import CodeNode from '../components/workflow/nodes/CodeNode'
-import HTTPNode from '../components/workflow/nodes/HTTPNode'
-import ToolNode from '../components/workflow/nodes/ToolNode'
-import HumanInterventionNode from '../components/workflow/nodes/HumanInterventionNode'
-import QuestionClassifierNode from '../components/workflow/nodes/QuestionClassifierNode'
+import NodePanel from '@/components/workflow/NodePanel'
+import NodeConfigDrawer from '@/components/workflow/NodeConfigDrawer'
+import DSLImportModal from '@/components/workflow/DSLImportModal'
+import WorkflowRunModal from '@/components/workflow/WorkflowRunModal'
+import StartNode from '@/components/workflow/nodes/StartNode'
+import EndNode from '@/components/workflow/nodes/EndNode'
+import LLMNode from '@/components/workflow/nodes/LLMNode'
+import KnowledgeNode from '@/components/workflow/nodes/KnowledgeNode'
+import ConditionNode from '@/components/workflow/nodes/ConditionNode'
+import CodeNode from '@/components/workflow/nodes/CodeNode'
+import HTTPNode from '@/components/workflow/nodes/HTTPNode'
+import ToolNode from '@/components/workflow/nodes/ToolNode'
+import HumanInterventionNode from '@/components/workflow/nodes/HumanInterventionNode'
+import QuestionClassifierNode from '@/components/workflow/nodes/QuestionClassifierNode'
 
 import {
   workflowApi,
@@ -46,7 +47,7 @@ import {
   WorkflowEdge as WFEdge,
   WorkflowConfig,
   DSLData,
-} from '../services/workflow'
+} from '@/services/workflow'
 
 // ------------------------------------------------------------------
 // 自定义节点类型映射
@@ -84,8 +85,6 @@ const WorkflowEditor: React.FC = () => {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [dslImportOpen, setDslImportOpen] = useState(false)
   const [runModalOpen, setRunModalOpen] = useState(false)
-  const [runInputs, setRunInputs] = useState('{}')
-  const [running, setRunning] = useState(false)
   const reactFlowWrapper = useRef<HTMLDivElement>(null)
 
   // ------------------------------------------------------------------
@@ -350,27 +349,19 @@ const WorkflowEditor: React.FC = () => {
   }
 
   // ------------------------------------------------------------------
-  // 执行工作流
+  // 起始节点变量
   // ------------------------------------------------------------------
 
-  const handleRun = async () => {
-    if (!appId) return
-    setRunning(true)
-    try {
-      const inputs = JSON.parse(runInputs)
-      const result = await workflowApi.run(Number(appId), { inputs })
-      message.success(`执行完成，运行 ID: ${result.run_id}`)
-      setRunModalOpen(false)
-    } catch (error: any) {
-      if (error instanceof SyntaxError) {
-        message.error('输入 JSON 格式错误')
-      } else {
-        message.error(`执行失败: ${error.response?.data?.detail || error.message}`)
-      }
-    } finally {
-      setRunning(false)
-    }
-  }
+  const startNodeVariables = (() => {
+    const startNode = nodes.find((n) => n.type === 'start')
+    if (!startNode) return []
+    return (startNode.data?.config?.variables || []).map((v: any) => ({
+      key: v.key || '',
+      type: v.type || 'string',
+      required: v.required !== false,
+      label: v.label || v.key || '',
+    }))
+  })()
 
   // ------------------------------------------------------------------
   // 渲染
@@ -462,12 +453,22 @@ const WorkflowEditor: React.FC = () => {
           setSelectedNode(null)
         }}
         onSave={handleNodeConfigSave}
+        appId={appId ? Number(appId) : undefined}
         upstreamNodes={(() => {
           if (!selectedNode) return []
-          const upstreamIds = edges
-            .filter((e) => e.target === selectedNode.id)
-            .map((e) => e.source)
-          return nodes.filter((n) => upstreamIds.includes(n.id))
+          // BFS 回溯所有祖先节点（不仅限直接上游）
+          const visited = new Set<string>()
+          const queue = [selectedNode.id]
+          while (queue.length > 0) {
+            const cur = queue.shift()!
+            for (const e of edges) {
+              if (e.target === cur && !visited.has(e.source)) {
+                visited.add(e.source)
+                queue.push(e.source)
+              }
+            }
+          }
+          return nodes.filter((n) => visited.has(n.id))
         })()}
       />
 
@@ -479,25 +480,14 @@ const WorkflowEditor: React.FC = () => {
       />
 
       {/* 运行弹窗 */}
-      <Modal
-        title="运行工作流"
-        open={runModalOpen}
-        onCancel={() => setRunModalOpen(false)}
-        onOk={handleRun}
-        confirmLoading={running}
-        okText="执行"
-      >
-        <div className="mb-2 text-sm text-text-secondary">
-          输入 JSON 格式的变量：
-        </div>
-        <Input.TextArea
-          value={runInputs}
-          onChange={(e) => setRunInputs(e.target.value)}
-          rows={6}
-          placeholder='{"query": "你好"}'
-          style={{ fontFamily: 'monospace' }}
+      {appId && (
+        <WorkflowRunModal
+          open={runModalOpen}
+          onClose={() => setRunModalOpen(false)}
+          appId={Number(appId)}
+          variables={startNodeVariables}
         />
-      </Modal>
+      )}
     </div>
   )
 }

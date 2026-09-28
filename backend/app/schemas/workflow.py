@@ -59,22 +59,41 @@ class LLMMemoryConfig(BaseModel):
     role_prefix: str = Field("USER", description="角色前缀")
 
 
+class LLMNodeInput(BaseModel):
+    """LLM 节点输入变量"""
+    name: str = Field("", description="变量名")
+    type: str = Field("String", description="变量类型: String, Number, Boolean, Array, Object")
+    required: bool = Field(True, description="是否必填")
+    description: str = Field("", description="变量描述")
+
+
+class LLMNodeOutput(BaseModel):
+    """LLM 节点输出变量"""
+    name: str = Field("", description="变量名")
+    type: str = Field("String", description="变量类型: String, Number, Boolean, Array, Object")
+    description: str = Field("", description="变量描述")
+
+
 class LLMNodeConfig(BaseModel):
     """LLM 节点配置"""
     model_id: Optional[int] = None
     model: Optional[str] = None
     prompt: str = ""
-    system_prompt: Optional[str] = None
+    user_message: str = ""
     temperature: float = Field(0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(2048, ge=1, le=8192)
     top_p: float = Field(1.0, ge=0.0, le=1.0)
     output_key: str = "output"
-    # 新增字段
+    # 输入输出变量
+    inputs: List[LLMNodeInput] = Field(default_factory=list, description="输入变量列表")
+    output_type: str = Field("text", description="输出类型: text, structured")
+    output_schema: Optional[Dict[str, Any]] = Field(None, description="结构化输出 JSON Schema")
+    output_variables: List[LLMNodeOutput] = Field(default_factory=list, description="结构化输出变量列表")
+    # 其他字段
     context: List[LLMContextVariable] = Field(default_factory=list, description="上下文变量列表")
     memory: LLMMemoryConfig = Field(default_factory=LLMMemoryConfig, description="记忆配置")
     vision: bool = Field(False, description="是否启用视觉")
     thinking_tag: bool = Field(False, description="是否启用推理标签分离")
-    structured_output: bool = Field(False, description="是否启用结构化输出")
     retry_on_failure: bool = Field(False, description="失败时重试")
 
 
@@ -248,6 +267,29 @@ class WorkflowRunRequest(BaseModel):
     """工作流执行请求"""
     inputs: Dict[str, Any] = Field(default_factory=dict)
     thread_id: Optional[str] = None
+
+
+class LLMNodeRunRequest(BaseModel):
+    """LLM 节点单独运行请求"""
+    model_id: int = Field(..., description="模型 ID")
+    prompt: str = Field("", description="系统提示词（已替换变量）")
+    user_message: str = Field("", description="用户消息（已替换变量）")
+    temperature: float = Field(0.7, ge=0.0, le=2.0)
+    max_tokens: int = Field(2048, ge=1, le=8192)
+    top_p: float = Field(1.0, ge=0.0, le=1.0)
+    variables: Dict[str, Any] = Field(default_factory=dict, description="变量值，用于替换提示词中的占位符")
+    output_type: str = Field("text", description="输出类型: text, structured")
+    output_schema: Optional[Dict[str, Any]] = Field(None, description="结构化输出 JSON Schema")
+    output_variables: List[LLMNodeOutput] = Field(default_factory=list, description="结构化输出变量列表")
+
+
+class LLMNodeRunResponse(BaseModel):
+    """LLM 节点运行响应"""
+    content: str = Field("", description="模型回复内容")
+    reasoning_content: Optional[str] = Field(None, description="推理内容（思考链）")
+    usage: Optional[Dict[str, Any]] = Field(None, description="token 用量")
+    model: Optional[str] = Field(None, description="实际使用的模型名")
+    structured_output: Optional[Dict[str, Any]] = Field(None, description="结构化输出解析结果")
 
 
 # ------------------------------------------------------------------

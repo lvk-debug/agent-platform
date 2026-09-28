@@ -4,6 +4,7 @@
 from typing import Any, List
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -13,6 +14,8 @@ from app.schemas.workflow import (
     DSLData,
     DSLExportResponse,
     DSLImportRequest,
+    LLMNodeRunRequest,
+    LLMNodeRunResponse,
     WorkflowConfig,
     WorkflowRunRequest,
     WorkflowRunResponse,
@@ -101,6 +104,96 @@ async def run_workflow(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"工作流执行失败: {str(e)}")
+
+
+@router.post("/{app_id}/run/stream")
+async def run_workflow_stream(
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    app_id: int,
+    request: WorkflowRunRequest,
+) -> Any:
+    """
+    流式执行工作流 (SSE)
+
+    返回 Server-Sent Events 流:
+    - event: node_start  - 节点开始执行
+    - event: node_log    - 节点执行完成（含执行日志）
+    - event: llm_token   - LLM 节点逐 token 输出
+    - event: done         - 工作流执行完成
+    - event: error        - 执行出错
+    """
+    import json as _json
+
+    _verify_app(db, current_user, app_id)
+
+    service = get_workflow_service(db)
+
+    async def _event_stream():
+        async for event in service.run_workflow_stream(
+            app_id=app_id,
+            inputs=request.inputs,
+            thread_id=request.thread_id,
+        ):
+            yield f"event: {event['event']}\ndata: {_json.dumps(event['data'], ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/{app_id}/llm-run", response_model=LLMNodeRunResponse)
+async def run_llm_node(
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    app_id: int,
+    request: LLMNodeRunRequest,
+) -> Any:
+    """单独运行 LLM 节点（用于调试）"""
+    _verify_app(db, current_user, app_id)
+
+    from app.services.workflow import execute_llm_node
+
+    # 变量替换
+    prompt = request.prompt
+    user_message = request.user_message
+    for key, value in request.variables.items():
+        prompt = prompt.replace("{{" + key + "}}", str(value))
+        user_message = user_message.replace("{{" + key + "}}", str(value))
+
+    try:
+        result = await execute_llm_node(
+            db=db,
+            model_id=request.model_id,
+            prompt=prompt,
+            user_message=user_message,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+            top_p=request.top_p,
+            output_type=request.output_type,
+            output_schema=request.output_schema,
+            output_variables=[v.model_dump() for v in request.output_variables] if request.output_variables else [],
+        )
+
+        return LLMNodeRunResponse(
+            content=result["content"],
+            reasoning_content=result["reasoning_content"],
+            usage=result["usage"],
+            model=result["model"],
+            structured_output=result["structured_output"],
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LLM 调用失败: {str(e)}")
 
 
 # ------------------------------------------------------------------

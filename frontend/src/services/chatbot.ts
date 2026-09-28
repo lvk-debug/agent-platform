@@ -2,7 +2,7 @@
  * 聊天助手 API 服务
  */
 import api from './api';
-import { useAuthStore } from '../stores/auth';
+import { useAuthStore } from '@/stores/auth';
 
 // 类型定义
 export type VariableType = 'text_input' | 'paragraph' | 'select' | 'number' | 'checkbox' | 'api_variable';

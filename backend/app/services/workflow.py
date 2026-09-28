@@ -1,11 +1,12 @@
 """
 工作流服务 — 基于 LangGraph 的工作流执行引擎 + 配置管理
 """
+
 import asyncio
 import json
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal, AsyncGenerator
 
 from sqlalchemy.orm import Session
 
@@ -23,6 +24,141 @@ from app.schemas.workflow import (
 from app.utils.logger import logger
 
 # ------------------------------------------------------------------
+# 共用：LLM 节点执行逻辑
+# ------------------------------------------------------------------
+
+
+async def execute_llm_node(
+    *,
+    db: Session,
+    model_id: int,
+    prompt: str,
+    user_message: str,
+    temperature: float = 0.7,
+    max_tokens: int = 2048,
+    top_p: float = 1.0,
+    output_type: str = "text",
+    output_schema: Any = None,
+    output_variables: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    统一的 LLM 节点执行逻辑，供 /llm-run 和 /run 共用。
+
+    Returns:
+        {
+            "content": str,
+            "reasoning_content": str | None,
+            "usage": dict,
+            "model": str,
+            "structured_output": dict | None,
+            "node_output": dict,       # 供工作流写入 node_outputs
+        }
+    """
+    import re
+    from app.services.llm import LLMService
+    from app.models.model import Model
+
+    # 防御性处理 None 值
+    prompt = prompt or ""
+    user_message = user_message or ""
+
+    # 结构化输出：将 schema 指令拼接到 user_message 前面
+    if output_type == "structured" and output_schema:
+        if isinstance(output_schema, str):
+            try:
+                schema_obj = json.loads(output_schema)
+            except Exception:
+                schema_obj = output_schema
+        else:
+            schema_obj = output_schema
+        schema_str = (
+            json.dumps(schema_obj, ensure_ascii=False, indent=2)
+            if isinstance(schema_obj, (dict, list))
+            else str(schema_obj)
+        )
+        schema_instruction = (
+            "请严格按照以下 JSON Schema 格式输出，不要输出任何其他内容：\n"
+            f"```json\n{schema_str}\n```\n\n"
+        )
+        user_message = schema_instruction + user_message
+
+    # 构建消息
+    messages: List[Dict[str, str]] = []
+    if prompt.strip():
+        messages.append({"role": "system", "content": prompt})
+    messages.append({"role": "user", "content": user_message})
+
+    # 查找模型
+    model = db.query(Model).filter(Model.id == model_id).first()
+    if not model or not model.provider:
+        raise ValueError("模型不存在或未配置供应商")
+
+    provider_config = model.provider
+    llm_service = LLMService()
+    await llm_service.register_provider(
+        provider_type=provider_config.provider_type,
+        api_key=provider_config.api_key,
+        api_endpoint=provider_config.api_endpoint,
+    )
+
+    response = await llm_service.chat(
+        messages=messages,
+        model=model.model_id,
+        provider=provider_config.provider_type,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        top_p=top_p,
+    )
+    result_text = response.get("content", "")
+    reasoning_content = response.get("reasoning_content")
+    usage = response.get("tokens_used", {})
+
+    # 结构化输出解析
+    structured = None
+    node_output: Dict[str, Any] = {}
+
+    if output_type == "structured" and output_variables:
+        try:
+            parsed = None
+            try:
+                parsed = json.loads(result_text)
+            except json.JSONDecodeError:
+                json_match = re.search(
+                    r"```(?:json)?\s*\n?(.*?)\n?```", result_text, re.DOTALL
+                )
+                if json_match:
+                    parsed = json.loads(json_match.group(1))
+            if parsed and isinstance(parsed, dict):
+                structured = {}
+                for var in output_variables:
+                    name = var.get("name", "") if isinstance(var, dict) else getattr(var, "name", "")
+                    if name and name in parsed:
+                        structured[name] = parsed[name]
+                        node_output[name] = parsed[name]
+                node_output["output"] = result_text
+            else:
+                node_output["output"] = result_text
+        except Exception:
+            node_output["output"] = result_text
+    else:
+        node_output["output"] = result_text
+
+    if reasoning_content:
+        node_output["reasoning_content"] = reasoning_content
+    if usage:
+        node_output["usage"] = usage
+
+    return {
+        "content": result_text,
+        "reasoning_content": reasoning_content,
+        "usage": usage,
+        "model": response.get("model"),
+        "structured_output": structured,
+        "node_output": node_output,
+    }
+
+
+# ------------------------------------------------------------------
 # LangGraph 导入
 # ------------------------------------------------------------------
 from langgraph.graph import StateGraph, START, END
@@ -30,13 +166,14 @@ from langgraph.checkpoint.memory import MemorySaver
 from typing import TypedDict, Annotated
 import operator
 
-
 # ------------------------------------------------------------------
 # LangGraph State 定义
 # ------------------------------------------------------------------
 
+
 class WorkflowState(TypedDict):
     """工作流执行状态"""
+
     # 用户输入
     inputs: Dict[str, Any]
     # 各节点输出（or reducer 自动合并字典）
@@ -49,19 +186,30 @@ class WorkflowState(TypedDict):
 # 节点工厂
 # ------------------------------------------------------------------
 
+
 def _make_start_node(node_id: str):
     """开始节点：透传 inputs 到 node_outputs"""
+
     async def _run(state: WorkflowState) -> dict:
         logger.info(f"[Start] node={node_id}")
         return {
             "node_outputs": {node_id: state["inputs"]},
-            "execution_log": [{"node_id": node_id, "type": "start", "status": "done", "ts": datetime.utcnow().isoformat()}],
+            "execution_log": [
+                {
+                    "node_id": node_id,
+                    "type": "start",
+                    "status": "done",
+                    "ts": datetime.utcnow().isoformat(),
+                }
+            ],
         }
+
     return _run
 
 
 def _make_end_node(node_id: str, output_keys: Optional[List[str]] = None):
     """结束节点：收集上游输出作为最终结果"""
+
     async def _run(state: WorkflowState) -> dict:
         logger.info(f"[End] node={node_id}, output_keys={output_keys}")
         # 收集所有上游输出
@@ -73,81 +221,247 @@ def _make_end_node(node_id: str, output_keys: Optional[List[str]] = None):
             final = list(all_outputs.values())[-1] if all_outputs else {}
         return {
             "node_outputs": {node_id: final},
-            "execution_log": [{"node_id": node_id, "type": "end", "status": "done", "ts": datetime.utcnow().isoformat()}],
+            "execution_log": [
+                {
+                    "node_id": node_id,
+                    "type": "end",
+                    "status": "done",
+                    "ts": datetime.utcnow().isoformat(),
+                }
+            ],
         }
+
     return _run
 
 
 def _make_llm_node(node_id: str, config: Dict[str, Any], db: Session):
     """LLM 节点：调用 LLM 服务"""
+
     async def _run(state: WorkflowState) -> dict:
         logger.info(f"[LLM] node={node_id}")
         try:
-            from app.services.llm import LLMService
-            from app.models.model import Model
-
-            prompt_template = config.get("prompt", "")
+            prompt_template = config.get("prompt") or ""
+            user_message_template = config.get("user_message") or ""
             model_id = config.get("model_id")
-            temperature = config.get("temperature", 0.7)
-            max_tokens = config.get("max_tokens", 2048)
-            system_prompt = config.get("system_prompt")
-            output_key = config.get("output_key", "output")
+            temperature = config.get("temperature") or 0.7
+            max_tokens = config.get("max_tokens") or 2048
+            top_p = config.get("top_p") or 1.0
+            output_type = config.get("output_type") or "text"
+            output_schema = config.get("output_schema")
+            output_variables = config.get("output_variables") or []
 
-            # 变量替换：用所有 node_outputs 的值
+            # 变量替换
             merged = _merge_outputs(state)
-            prompt = _replace_vars(prompt_template, merged)
+            prompt = _replace_vars(prompt_template, merged) or ""
+            user_message = _replace_vars(user_message_template, merged) or ""
 
-            messages = []
-            if system_prompt:
-                sys_prompt = _replace_vars(system_prompt, merged)
-                messages.append({"role": "system", "content": sys_prompt})
-            messages.append({"role": "user", "content": prompt})
+            if not model_id:
+                return {
+                    "node_outputs": {node_id: {"output": "[LLM 模型未配置]"}},
+                    "execution_log": [{"node_id": node_id, "type": "llm", "status": "error", "error": "no model_id", "ts": datetime.utcnow().isoformat()}],
+                }
 
-            # 查找模型
-            if model_id:
-                model = db.query(Model).filter(Model.id == model_id).first()
-                if model and model.provider:
-                    provider_config = model.provider
-                    llm_service = LLMService()
-                    await llm_service.register_provider(
-                        provider_type=provider_config.provider_type,
-                        api_key=provider_config.api_key,
-                        api_endpoint=provider_config.api_endpoint,
-                    )
-                    response = await llm_service.chat(
-                        messages=messages,
-                        model=model.model_id,
-                        provider=provider_config.provider_type,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                    )
-                    result_text = response.get("content", "")
-                else:
-                    result_text = f"[LLM 模型未配置] prompt: {prompt[:100]}"
-            else:
-                result_text = f"[LLM 模型未配置] prompt: {prompt[:100]}"
+            result = await execute_llm_node(
+                db=db,
+                model_id=model_id,
+                prompt=prompt,
+                user_message=user_message,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=top_p,
+                output_type=output_type,
+                output_schema=output_schema,
+                output_variables=output_variables,
+            )
 
             return {
-                "node_outputs": {node_id: {output_key: result_text}},
-                "execution_log": [{"node_id": node_id, "type": "llm", "status": "done", "output_len": len(result_text), "ts": datetime.utcnow().isoformat()}],
+                "node_outputs": {node_id: result["node_output"]},
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "llm",
+                        "status": "done",
+                        "output_len": len(result["content"]),
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
             }
         except Exception as e:
             logger.error(f"[LLM] node={node_id} error: {e}", exc_info=True)
             return {
-                "node_outputs": {node_id: {config.get("output_key", "output"): f"[LLM 错误] {e}"}},
-                "execution_log": [{"node_id": node_id, "type": "llm", "status": "error", "error": str(e), "ts": datetime.utcnow().isoformat()}],
+                "node_outputs": {
+                    node_id: {"output": f"[LLM 错误] {e}"}
+                },
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "llm",
+                        "status": "error",
+                        "error": str(e),
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
             }
+
+    return _run
+
+
+def _make_llm_node_streaming(
+    node_id: str,
+    config: Dict[str, Any],
+    db: Session,
+    token_queue: asyncio.Queue,
+):
+    """LLM 节点（流式版本）：逐 token 推送到 token_queue"""
+
+    async def _run(state: WorkflowState) -> dict:
+        logger.info(f"[LLM-streaming] node={node_id}")
+        try:
+            prompt_template = config.get("prompt") or ""
+            user_message_template = config.get("user_message") or ""
+            model_id = config.get("model_id")
+            temperature = config.get("temperature") or 0.7
+            max_tokens = config.get("max_tokens") or 2048
+            top_p = config.get("top_p") or 1.0
+            output_type = config.get("output_type") or "text"
+            output_schema = config.get("output_schema")
+            output_variables = config.get("output_variables") or []
+
+            merged = _merge_outputs(state)
+            prompt = _replace_vars(prompt_template, merged) or ""
+            user_message = _replace_vars(user_message_template, merged) or ""
+
+            if not model_id:
+                return {
+                    "node_outputs": {node_id: {"output": "[LLM 模型未配置]"}},
+                    "execution_log": [{"node_id": node_id, "type": "llm", "status": "error", "error": "no model_id", "ts": datetime.utcnow().isoformat()}],
+                }
+
+            # 结构化输出：拼接 schema 指令
+            if output_type == "structured" and output_schema:
+                if isinstance(output_schema, str):
+                    try:
+                        schema_obj = json.loads(output_schema)
+                    except Exception:
+                        schema_obj = output_schema
+                else:
+                    schema_obj = output_schema
+                schema_str = (
+                    json.dumps(schema_obj, ensure_ascii=False, indent=2)
+                    if isinstance(schema_obj, (dict, list))
+                    else str(schema_obj)
+                )
+                schema_instruction = (
+                    "请严格按照以下 JSON Schema 格式输出，不要输出任何其他内容：\n"
+                    f"```json\n{schema_str}\n```\n\n"
+                )
+                user_message = schema_instruction + user_message
+
+            # 构建消息
+            messages: List[Dict[str, str]] = []
+            if prompt.strip():
+                messages.append({"role": "system", "content": prompt})
+            messages.append({"role": "user", "content": user_message})
+
+            # 查找模型
+            from app.models.model import Model
+            model = db.query(Model).filter(Model.id == model_id).first()
+            if not model or not model.provider:
+                raise ValueError("模型不存在或未配置供应商")
+
+            provider_config = model.provider
+            from app.services.llm import LLMService
+            llm_service = LLMService()
+            await llm_service.register_provider(
+                provider_type=provider_config.provider_type,
+                api_key=provider_config.api_key,
+                api_endpoint=provider_config.api_endpoint,
+            )
+
+            # 流式调用，逐 token 推送到队列
+            full_content = ""
+            async for chunk in llm_service.stream_chat(
+                messages=messages,
+                model=model.model_id,
+                provider=provider_config.provider_type,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=top_p,
+            ):
+                full_content += chunk
+                await token_queue.put({"event": "llm_token", "data": {"node_id": node_id, "token": chunk}})
+
+            # 结构化输出解析
+            node_output: Dict[str, Any] = {}
+            if output_type == "structured" and output_variables:
+                import re
+                try:
+                    parsed = None
+                    try:
+                        parsed = json.loads(full_content)
+                    except json.JSONDecodeError:
+                        json_match = re.search(
+                            r"```(?:json)?\s*\n?(.*?)\n?```", full_content, re.DOTALL
+                        )
+                        if json_match:
+                            parsed = json.loads(json_match.group(1))
+                    if parsed and isinstance(parsed, dict):
+                        for var in output_variables:
+                            name = var.get("name", "") if isinstance(var, dict) else getattr(var, "name", "")
+                            if name and name in parsed:
+                                node_output[name] = parsed[name]
+                        node_output["output"] = full_content
+                    else:
+                        node_output["output"] = full_content
+                except Exception:
+                    node_output["output"] = full_content
+            else:
+                node_output["output"] = full_content
+
+            return {
+                "node_outputs": {node_id: node_output},
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "llm",
+                        "status": "done",
+                        "output_len": len(full_content),
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
+            }
+        except Exception as e:
+            logger.error(f"[LLM-streaming] node={node_id} error: {e}", exc_info=True)
+            return {
+                "node_outputs": {node_id: {"output": f"[LLM 错误] {e}"}},
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "llm",
+                        "status": "error",
+                        "error": str(e),
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
+            }
+
     return _run
 
 
 def _make_knowledge_node(node_id: str, config: Dict[str, Any], db: Session):
     """知识库检索节点"""
+
     async def _run(state: WorkflowState) -> dict:
         logger.info(f"[Knowledge] node={node_id}")
         try:
             from app.services.knowledge import get_knowledge_service
 
-            kb_id = config.get("knowledge_base_id")
+            # 支持 knowledge_base_ids (数组) 和 knowledge_base_id (单个)
+            kb_ids = config.get("knowledge_base_ids") or []
+            if not kb_ids:
+                single = config.get("knowledge_base_id")
+                if single:
+                    kb_ids = [single]
             top_k = config.get("top_k", 5)
             score_threshold = config.get("score_threshold", 0.5)
             query_key = config.get("query_key", "query")
@@ -156,51 +470,118 @@ def _make_knowledge_node(node_id: str, config: Dict[str, Any], db: Session):
             rerank_top_k = config.get("rerank_top_k", 3)
 
             merged = _merge_outputs(state)
-            query = str(merged.get(query_key, ""))
 
-            if not kb_id:
+            # 优先从 query_variable（PromptEditor 存储的模板文本）获取，替换变量
+            # 纯变量引用（如 {{start.query}}）直接返回原始值（支持数组）
+            query_variable = config.get("query_variable", "")
+            if query_variable:
+                raw_query = _resolve_var_template(query_variable, merged)
+            else:
+                raw_query = merged.get(query_key, "")
+
+            # 支持数组查询：拆分为多个 query
+            if isinstance(raw_query, list):
+                queries = [str(q) for q in raw_query if q]
+            else:
+                queries = [str(raw_query)]
+
+            if not kb_ids or not any(queries):
                 return {
-                    "node_outputs": {node_id: {output_key: []}},
-                    "execution_log": [{"node_id": node_id, "type": "knowledge", "status": "skipped", "reason": "no kb_id", "ts": datetime.utcnow().isoformat()}],
+                    "node_outputs": {node_id: {output_key: [], "query": raw_query}},
+                    "execution_log": [
+                        {
+                            "node_id": node_id,
+                            "type": "knowledge",
+                            "status": "skipped",
+                            "reason": "no kb_id or empty query",
+                            "ts": datetime.utcnow().isoformat(),
+                        }
+                    ],
                 }
 
             knowledge_service = get_knowledge_service(db)
-            results = await knowledge_service.search(
-                kb_id=kb_id,
-                query=query,
-                top_k=top_k,
-                score_threshold=score_threshold,
-            )
+
+            # 按 (kb_id, query) 组合检索，合并去重
+            all_results: List[Dict[str, Any]] = []
+            seen_contents: set = set()
+            for kb_id in kb_ids:
+                for query in queries:
+                    if not query.strip():
+                        continue
+                    results = await knowledge_service.search(
+                        kb_id=kb_id,
+                        query=query,
+                        top_k=top_k,
+                        score_threshold=score_threshold,
+                    )
+                    for r in results:
+                        content = r.get("content", "")
+                        if content not in seen_contents:
+                            seen_contents.add(content)
+                            all_results.append(r)
 
             # 重排序（如果启用）
-            if rerank_enabled and results:
+            if rerank_enabled and all_results:
                 try:
                     from app.services.reranker import get_reranker_service
+
                     reranker = get_reranker_service()
-                    logger.info(f"[Knowledge] node={node_id} 启用重排序, 原始结果: {len(results)}, top_k: {rerank_top_k}")
-                    results = await reranker.rerank(
-                        query=query,
-                        documents=results,
+                    logger.info(
+                        f"[Knowledge] node={node_id} 启用重排序, 原始结果: {len(all_results)}, top_k: {rerank_top_k}"
+                    )
+                    # 用第一个 query 做重排序的参考
+                    all_results = await reranker.rerank(
+                        query=queries[0],
+                        documents=all_results,
                         top_k=rerank_top_k,
                     )
-                    logger.info(f"[Knowledge] node={node_id} 重排序完成, 结果数: {len(results)}")
+                    logger.info(
+                        f"[Knowledge] node={node_id} 重排序完成, 结果数: {len(all_results)}"
+                    )
                 except Exception as e:
-                    logger.warning(f"[Knowledge] node={node_id} 重排序失败，使用原始结果: {e}", exc_info=True)
+                    logger.warning(
+                        f"[Knowledge] node={node_id} 重排序失败，使用原始结果: {e}",
+                        exc_info=True,
+                    )
 
+            # 最终截断到 top_k
+            all_results = all_results[:top_k]
+            print(f'all_results: {all_results}')
             return {
-                "node_outputs": {node_id: {output_key: results, "query": query}},
-                "execution_log": [{"node_id": node_id, "type": "knowledge", "status": "done", "results_count": len(results), "ts": datetime.utcnow().isoformat()}],
+                "node_outputs": {
+                    node_id: {output_key: all_results, "query": raw_query}
+                },
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "knowledge",
+                        "status": "done",
+                        "results_count": len(all_results),
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
             }
         except Exception as e:
             logger.error(f"[Knowledge] node={node_id} error: {e}", exc_info=True)
             return {
                 "node_outputs": {node_id: {config.get("output_key", "documents"): []}},
-                "execution_log": [{"node_id": node_id, "type": "knowledge", "status": "error", "error": str(e), "ts": datetime.utcnow().isoformat()}],
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "knowledge",
+                        "status": "error",
+                        "error": str(e),
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
             }
+
     return _run
 
 
-def _make_condition_router(node_id: str, config: Dict[str, Any], edges: List[Dict[str, str]]):
+def _make_condition_router(
+    node_id: str, config: Dict[str, Any], edges: List[Dict[str, str]]
+):
     """条件路由函数：根据条件评估返回分支名"""
     branches = config.get("branches", [])
 
@@ -215,7 +596,9 @@ def _make_condition_router(node_id: str, config: Dict[str, Any], edges: List[Dic
             branch_name = branch.get("branch", "__end__")
 
             if op == "default":
-                logger.info(f"[Condition] node={node_id} → default branch: {branch_name}")
+                logger.info(
+                    f"[Condition] node={node_id} → default branch: {branch_name}"
+                )
                 return branch_name
 
             var_value = str(merged.get(var_name, ""))
@@ -254,6 +637,7 @@ def _make_condition_router(node_id: str, config: Dict[str, Any], edges: List[Dic
 
 def _make_code_node(node_id: str, config: Dict[str, Any]):
     """代码执行节点（受限沙箱）"""
+
     async def _run(state: WorkflowState) -> dict:
         logger.info(f"[Code] node={node_id}")
         code = config.get("code", "")
@@ -269,25 +653,45 @@ def _make_code_node(node_id: str, config: Dict[str, Any]):
                 "merged": merged,
             }
             exec(code, {"__builtins__": {}}, sandbox)
-            result = sandbox.get("result", sandbox.get(output_key, "代码未设置 result 变量"))
+            result = sandbox.get(
+                "result", sandbox.get(output_key, "代码未设置 result 变量")
+            )
 
             return {
                 "node_outputs": {node_id: {output_key: result}},
-                "execution_log": [{"node_id": node_id, "type": "code", "status": "done", "ts": datetime.utcnow().isoformat()}],
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "code",
+                        "status": "done",
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
             }
         except Exception as e:
             logger.error(f"[Code] node={node_id} error: {e}", exc_info=True)
             return {
                 "node_outputs": {node_id: {output_key: f"[代码执行错误] {e}"}},
-                "execution_log": [{"node_id": node_id, "type": "code", "status": "error", "error": str(e), "ts": datetime.utcnow().isoformat()}],
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "code",
+                        "status": "error",
+                        "error": str(e),
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
             }
+
     return _run
 
 
 def _make_http_node(node_id: str, config: Dict[str, Any]):
     """HTTP 请求节点"""
+
     async def _run(state: WorkflowState) -> dict:
         import httpx
+
         logger.info(f"[HTTP] node={node_id}")
 
         url = config.get("url", "")
@@ -307,6 +711,7 @@ def _make_http_node(node_id: str, config: Dict[str, Any]):
 
         try:
             from app.services.llm import _http_client as http_client
+
             kwargs = {"headers": headers, "timeout": float(timeout)}
             if method == "GET":
                 resp = await http_client.get(url, **kwargs)
@@ -331,19 +736,37 @@ def _make_http_node(node_id: str, config: Dict[str, Any]):
                 }
                 return {
                     "node_outputs": {node_id: {output_key: result}},
-                    "execution_log": [{"node_id": node_id, "type": "http", "status": "done", "status_code": resp.status_code, "ts": datetime.utcnow().isoformat()}],
+                    "execution_log": [
+                        {
+                            "node_id": node_id,
+                            "type": "http",
+                            "status": "done",
+                            "status_code": resp.status_code,
+                            "ts": datetime.utcnow().isoformat(),
+                        }
+                    ],
                 }
         except Exception as e:
             logger.error(f"[HTTP] node={node_id} error: {e}", exc_info=True)
             return {
                 "node_outputs": {node_id: {output_key: {"error": str(e)}}},
-                "execution_log": [{"node_id": node_id, "type": "http", "status": "error", "error": str(e), "ts": datetime.utcnow().isoformat()}],
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "http",
+                        "status": "error",
+                        "error": str(e),
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
             }
+
     return _run
 
 
 def _make_tool_node(node_id: str, config: Dict[str, Any], db: Session):
     """工具执行节点 — 通过 ToolExecutor 执行实际工具调用"""
+
     async def _run(state: WorkflowState) -> dict:
         from app.models.tool import Tool
         from app.services.tool_executor import get_tool_executor
@@ -360,7 +783,15 @@ def _make_tool_node(node_id: str, config: Dict[str, Any], db: Session):
         if not tool_id:
             return {
                 "node_outputs": {node_id: {output_key: "[工具节点未配置 tool_id]"}},
-                "execution_log": [{"node_id": node_id, "type": "tool", "status": "skipped", "reason": "no tool_id", "ts": datetime.utcnow().isoformat()}],
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "tool",
+                        "status": "skipped",
+                        "reason": "no tool_id",
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
             }
 
         # 加载工具
@@ -368,7 +799,15 @@ def _make_tool_node(node_id: str, config: Dict[str, Any], db: Session):
         if not db_tool:
             return {
                 "node_outputs": {node_id: {output_key: f"[工具不存在: id={tool_id}]"}},
-                "execution_log": [{"node_id": node_id, "type": "tool", "status": "error", "error": f"tool not found: {tool_id}", "ts": datetime.utcnow().isoformat()}],
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "tool",
+                        "status": "error",
+                        "error": f"tool not found: {tool_id}",
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
             }
 
         # 参数变量替换
@@ -386,37 +825,70 @@ def _make_tool_node(node_id: str, config: Dict[str, Any], db: Session):
         attempts = retry_count if error_action == "retry" else 1
 
         for attempt in range(attempts):
-            result = await executor.execute(db_tool, resolved_params, timeout=float(timeout))
+            result = await executor.execute(
+                db_tool, resolved_params, timeout=float(timeout)
+            )
             if result["success"]:
                 return {
                     "node_outputs": {node_id: {output_key: result["output"]}},
-                    "execution_log": [{
-                        "node_id": node_id, "type": "tool", "status": "done",
-                        "tool_name": db_tool.name, "duration_ms": result["duration_ms"],
-                        "ts": datetime.utcnow().isoformat(),
-                    }],
+                    "execution_log": [
+                        {
+                            "node_id": node_id,
+                            "type": "tool",
+                            "status": "done",
+                            "tool_name": db_tool.name,
+                            "duration_ms": result["duration_ms"],
+                            "ts": datetime.utcnow().isoformat(),
+                        }
+                    ],
                 }
             last_error = result["error"]
             if attempt < attempts - 1:
-                logger.warning(f"[Tool] node={node_id} 重试 {attempt + 1}/{attempts}: {last_error}")
+                logger.warning(
+                    f"[Tool] node={node_id} 重试 {attempt + 1}/{attempts}: {last_error}"
+                )
 
         # 所有重试都失败
         if error_action == "skip":
             return {
                 "node_outputs": {node_id: {output_key: None}},
-                "execution_log": [{"node_id": node_id, "type": "tool", "status": "skipped", "error": last_error, "ts": datetime.utcnow().isoformat()}],
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "tool",
+                        "status": "skipped",
+                        "error": last_error,
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
             }
         elif error_action == "fallback":
             fallback_value = config.get("fallback_value", "")
             return {
                 "node_outputs": {node_id: {output_key: fallback_value}},
-                "execution_log": [{"node_id": node_id, "type": "tool", "status": "fallback", "error": last_error, "ts": datetime.utcnow().isoformat()}],
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "tool",
+                        "status": "fallback",
+                        "error": last_error,
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
             }
         else:
             # stop 或默认：返回错误信息
             return {
                 "node_outputs": {node_id: {output_key: f"[工具执行失败] {last_error}"}},
-                "execution_log": [{"node_id": node_id, "type": "tool", "status": "error", "error": last_error, "ts": datetime.utcnow().isoformat()}],
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "tool",
+                        "status": "error",
+                        "error": last_error,
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
             }
 
     return _run
@@ -424,6 +896,7 @@ def _make_tool_node(node_id: str, config: Dict[str, Any], db: Session):
 
 def _make_human_intervention_node(node_id: str, config: Dict[str, Any]):
     """人工介入节点 — 等待人工审批"""
+
     async def _run(state: WorkflowState) -> dict:
         logger.info(f"[HumanIntervention] node={node_id}")
         timeout = config.get("timeout", 300)
@@ -442,19 +915,23 @@ def _make_human_intervention_node(node_id: str, config: Dict[str, Any]):
 
         return {
             "node_outputs": {node_id: {output_key: result}},
-            "execution_log": [{
-                "node_id": node_id,
-                "type": "human_intervention",
-                "status": "done",
-                "action": "approved",
-                "ts": datetime.utcnow().isoformat(),
-            }],
+            "execution_log": [
+                {
+                    "node_id": node_id,
+                    "type": "human_intervention",
+                    "status": "done",
+                    "action": "approved",
+                    "ts": datetime.utcnow().isoformat(),
+                }
+            ],
         }
+
     return _run
 
 
 def _make_question_classifier_node(node_id: str, config: Dict[str, Any], db: Session):
     """问题分类器节点：调用 LLM 对输入进行分类"""
+
     async def _run(state: WorkflowState) -> dict:
         logger.info(f"[QuestionClassifier] node={node_id}")
         try:
@@ -477,7 +954,10 @@ def _make_question_classifier_node(node_id: str, config: Dict[str, Any], db: Ses
 
             # 构建分类提示词
             category_list = "\n".join(
-                [f"{i+1}. {c.get('name', '')}: {c.get('description', '')}" for i, c in enumerate(categories)]
+                [
+                    f"{i+1}. {c.get('name', '')}: {c.get('description', '')}"
+                    for i, c in enumerate(categories)
+                ]
             )
             classification_prompt = (
                 f"请将以下输入文本分类到给定的类别中。\n\n"
@@ -507,38 +987,63 @@ def _make_question_classifier_node(node_id: str, config: Dict[str, Any], db: Ses
                     result_text = response.get("content", "").strip()
                 else:
                     # 模型未配置，返回第一个分类
-                    result_text = categories[0].get("name", "CLASS 1") if categories else "CLASS 1"
+                    result_text = (
+                        categories[0].get("name", "CLASS 1")
+                        if categories
+                        else "CLASS 1"
+                    )
             else:
-                result_text = categories[0].get("name", "CLASS 1") if categories else "CLASS 1"
+                result_text = (
+                    categories[0].get("name", "CLASS 1") if categories else "CLASS 1"
+                )
 
             return {
                 "node_outputs": {node_id: {output_key: result_text}},
-                "execution_log": [{
-                    "node_id": node_id, "type": "question_classifier",
-                    "status": "done", "classification": result_text,
-                    "ts": datetime.utcnow().isoformat(),
-                }],
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "question_classifier",
+                        "status": "done",
+                        "classification": result_text,
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
             }
         except Exception as e:
-            logger.error(f"[QuestionClassifier] node={node_id} error: {e}", exc_info=True)
+            logger.error(
+                f"[QuestionClassifier] node={node_id} error: {e}", exc_info=True
+            )
             return {
-                "node_outputs": {node_id: {config.get("output_key", "classification"): f"[分类错误] {e}"}},
-                "execution_log": [{
-                    "node_id": node_id, "type": "question_classifier",
-                    "status": "error", "error": str(e),
-                    "ts": datetime.utcnow().isoformat(),
-                }],
+                "node_outputs": {
+                    node_id: {
+                        config.get("output_key", "classification"): f"[分类错误] {e}"
+                    }
+                },
+                "execution_log": [
+                    {
+                        "node_id": node_id,
+                        "type": "question_classifier",
+                        "status": "error",
+                        "error": str(e),
+                        "ts": datetime.utcnow().isoformat(),
+                    }
+                ],
             }
+
     return _run
 
 
-def _make_question_classifier_router(node_id: str, config: Dict[str, Any], edges: List[Dict[str, str]]):
+def _make_question_classifier_router(
+    node_id: str, config: Dict[str, Any], edges: List[Dict[str, str]]
+):
     """问题分类器路由函数：根据 LLM 分类结果选择输出分支"""
     categories = config.get("categories", [])
     output_key = config.get("output_key", "classification")
 
     def _route(state: WorkflowState) -> str:
-        logger.info(f"[QuestionClassifier] route node={node_id}, categories={len(categories)}")
+        logger.info(
+            f"[QuestionClassifier] route node={node_id}, categories={len(categories)}"
+        )
         node_output = state.get("node_outputs", {}).get(node_id, {})
         classification = str(node_output.get(output_key, "")).strip()
 
@@ -564,29 +1069,65 @@ def _make_question_classifier_router(node_id: str, config: Dict[str, Any], edges
 # 辅助函数
 # ------------------------------------------------------------------
 
+
 def _merge_outputs(state: WorkflowState) -> Dict[str, Any]:
-    """合并所有 node_outputs 为一个扁平字典"""
+    """合并所有 node_outputs 为一个扁平字典，支持 node_id.key 格式"""
     merged = {}
     merged.update(state.get("inputs", {}))
     for node_id, output in state.get("node_outputs", {}).items():
         if isinstance(output, dict):
             merged.update(output)
+            # 同时注册 node_id.key 格式（前端 {{node_id.key}} 语法）
+            for key, value in output.items():
+                merged[f"{node_id}.{key}"] = value
         else:
             merged[node_id] = output
     return merged
 
 
-def _replace_vars(text: str, variables: Dict[str, Any]) -> str:
-    """替换文本中的 {variable} 占位符"""
+def _replace_vars(text: Any, variables: Dict[str, Any]) -> str:
+    """替换文本中的 {variable} 和 {{variable}} 占位符"""
+    if not isinstance(text, str):
+        text = str(text) if text is not None else ""
     for key, value in variables.items():
+        text = text.replace("{{" + key + "}}", str(value))
         text = text.replace("{" + key + "}", str(value))
     return text
 
 
+def _resolve_var_template(template: Any, variables: Dict[str, Any]) -> Any:
+    """解析模板文本：如果整个模板是单个变量引用则返回原始值（可能是数组），否则做字符串替换"""
+    import re
+
+    if not isinstance(template, str):
+        template = str(template) if template is not None else ""
+
+    # 匹配整个模板是否只有一个 {{key}} 或 {key}
+    pattern = r"^\{\{(\w[\w.]*)\}\}$"
+    m = re.match(pattern, template.strip())
+    if m:
+        var_name = m.group(1)
+        if var_name in variables:
+            return variables[var_name]
+    # 多个变量引用或混合文本，走字符串替换
+    return _replace_vars(template, variables)
+
+
 def _make_noop_node(node_id: str):
     """空操作节点（用于 condition 计算占位）"""
+
     async def _run(state: WorkflowState) -> dict:
-        return {"execution_log": [{"node_id": node_id, "type": "noop", "status": "done", "ts": datetime.utcnow().isoformat()}]}
+        return {
+            "execution_log": [
+                {
+                    "node_id": node_id,
+                    "type": "noop",
+                    "status": "done",
+                    "ts": datetime.utcnow().isoformat(),
+                }
+            ]
+        }
+
     return _run
 
 
@@ -594,14 +1135,16 @@ def _make_noop_node(node_id: str):
 # 图构建器
 # ------------------------------------------------------------------
 
+
 class GraphBuilder:
     """从 DSL 配置动态构建 LangGraph StateGraph"""
 
-    def __init__(self, nodes: List[Dict], edges: List[Dict], db: Session):
+    def __init__(self, nodes: List[Dict], edges: List[Dict], db: Session, token_queue: Optional[asyncio.Queue] = None):
         self.nodes = {n["id"]: n for n in nodes}
         self.edges = edges
         self.db = db
         self.node_fns: Dict[str, Any] = {}
+        self.token_queue = token_queue
 
     def build(self):
         """构建并编译 StateGraph"""
@@ -622,7 +1165,11 @@ class GraphBuilder:
 
         # 2. 注册边
         # 找出所有 condition 和 question_classifier 节点（都需要条件路由）
-        condition_nodes = {nid: n for nid, n in self.nodes.items() if n["type"] in ("condition", "question_classifier")}
+        condition_nodes = {
+            nid: n
+            for nid, n in self.nodes.items()
+            if n["type"] in ("condition", "question_classifier")
+        }
 
         # 先处理 condition/question_classifier 节点的条件边
         condition_edge_sources = set()
@@ -647,7 +1194,9 @@ class GraphBuilder:
 
             # 根据节点类型选择路由函数
             if cond_node["type"] == "question_classifier":
-                router = _make_question_classifier_router(cond_id, cond_config, cond_edges)
+                router = _make_question_classifier_router(
+                    cond_id, cond_config, cond_edges
+                )
             else:
                 router = _make_condition_router(cond_id, cond_config, cond_edges)
             g.add_conditional_edges(cond_id, router, branch_map)
@@ -675,7 +1224,11 @@ class GraphBuilder:
             nodes_with_outgoing.add(e["source"])
 
         root_nodes = [nid for nid in self.nodes if nid not in nodes_with_incoming]
-        leaf_nodes = [nid for nid in self.nodes if nid not in nodes_with_outgoing and nid not in condition_edge_sources]
+        leaf_nodes = [
+            nid
+            for nid in self.nodes
+            if nid not in nodes_with_outgoing and nid not in condition_edge_sources
+        ]
 
         if root_nodes:
             for root in root_nodes:
@@ -694,6 +1247,8 @@ class GraphBuilder:
             output_keys = config.get("output_keys", [])
             return _make_end_node(node_id, output_keys or None)
         elif node_type == "llm":
+            if self.token_queue is not None:
+                return _make_llm_node_streaming(node_id, config, self.db, self.token_queue)
             return _make_llm_node(node_id, config, self.db)
         elif node_type == "knowledge_retrieval":
             return _make_knowledge_node(node_id, config, self.db)
@@ -715,6 +1270,7 @@ class GraphBuilder:
 # ------------------------------------------------------------------
 # WorkflowService — 配置管理 + 执行
 # ------------------------------------------------------------------
+
 
 class WorkflowService:
     """工作流服务"""
@@ -828,7 +1384,9 @@ class WorkflowService:
             run.outputs = final_output
             run.node_runs = result.get("node_outputs", {})
             run.finished_at = datetime.utcnow()
-            run.duration = int((run.finished_at - run.started_at).total_seconds() * 1000)
+            run.duration = int(
+                (run.finished_at - run.started_at).total_seconds() * 1000
+            )
             self.db.commit()
 
             logger.info(f"工作流执行完成: app_id={app_id}, run_id={run.id}")
@@ -846,10 +1404,151 @@ class WorkflowService:
             run.error_message = str(e)
             run.finished_at = datetime.utcnow()
             if run.started_at:
-                run.duration = int((run.finished_at - run.started_at).total_seconds() * 1000)
+                run.duration = int(
+                    (run.finished_at - run.started_at).total_seconds() * 1000
+                )
             self.db.commit()
             logger.error(f"工作流执行失败: app_id={app_id}, error={e}", exc_info=True)
             raise
+
+    async def run_workflow_stream(
+        self,
+        app_id: int,
+        inputs: Dict[str, Any],
+        thread_id: Optional[str] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        流式执行工作流
+
+        逐步 yield 事件:
+        - {"event": "node_start", "data": {"node_id": ..., "type": ...}}
+        - {"event": "node_log",    "data": {execution_log_entry}}
+        - {"event": "llm_token",   "data": {"node_id": ..., "token": ...}}
+        - {"event": "done",        "data": {"outputs": ..., "execution_log": ...}}
+        - {"event": "error",       "data": {"message": ...}}
+        """
+        workflow = self.db.query(Workflow).filter(Workflow.app_id == app_id).first()
+        if not workflow:
+            yield {"event": "error", "data": {"message": "工作流不存在"}}
+            return
+
+        graph_data = workflow.graph or {}
+        nodes_data = graph_data.get("nodes", [])
+        edges_data = graph_data.get("edges", [])
+
+        if not nodes_data:
+            yield {"event": "error", "data": {"message": "工作流图为空，请先配置节点"}}
+            return
+
+        # 创建运行记录
+        run = WorkflowRun(
+            workflow_id=workflow.id,
+            status="running",
+            inputs=inputs,
+            started_at=datetime.utcnow(),
+        )
+        self.db.add(run)
+        self.db.commit()
+        self.db.refresh(run)
+
+        # LLM token 队列
+        token_queue: asyncio.Queue = asyncio.Queue()
+
+        try:
+            # 构建 LangGraph（传入 token_queue 以启用 LLM 流式节点）
+            builder = GraphBuilder(nodes_data, edges_data, self.db, token_queue=token_queue)
+            compiled_graph = builder.build()
+
+            # 节点类型映射（用于 node_start 事件）
+            node_type_map = {n["id"]: n["type"] for n in nodes_data}
+
+            # 用后台任务执行 graph，主协程从 token_queue 读取事件
+            tid = thread_id or str(uuid.uuid4())
+            graph_config = {"configurable": {"thread_id": tid}}
+
+            async def _run_graph():
+                return await compiled_graph.ainvoke(
+                    {"inputs": inputs, "node_outputs": {}, "execution_log": []},
+                    config=graph_config,
+                )
+
+            graph_task = asyncio.create_task(_run_graph())
+
+            # 已发出的 node_start 事件跟踪
+            seen_starts: set = set()
+
+            while not graph_task.done():
+                try:
+                    event = await asyncio.wait_for(token_queue.get(), timeout=0.1)
+                    # 如果是 llm_token 且该节点未发过 node_start，先发 node_start
+                    if event.get("event") == "llm_token":
+                        nid = event["data"]["node_id"]
+                        if nid not in seen_starts:
+                            seen_starts.add(nid)
+                            yield {"event": "node_start", "data": {"node_id": nid, "type": "llm"}}
+                    yield event
+                except asyncio.TimeoutError:
+                    continue
+
+            # graph 执行完毕，收集结果
+            result = graph_task.result()
+
+            # 排空队列中剩余的 token
+            while not token_queue.empty():
+                try:
+                    event = token_queue.get_nowait()
+                    yield event
+                except asyncio.QueueEmpty:
+                    break
+
+            # 发送执行日志
+            for log_entry in result.get("execution_log", []):
+                yield {"event": "node_log", "data": log_entry}
+
+            # 提取最终输出
+            final_output = {}
+            for node_id, node_data in self.nodes_iter(nodes_data):
+                if node_data["type"] == "end":
+                    final_output = result.get("node_outputs", {}).get(node_id, {})
+                    break
+
+            if not final_output:
+                all_outputs = result.get("node_outputs", {})
+                if all_outputs:
+                    final_output = list(all_outputs.values())[-1]
+
+            # 更新运行记录
+            run.status = "completed"
+            run.outputs = final_output
+            run.node_runs = result.get("node_outputs", {})
+            run.finished_at = datetime.utcnow()
+            run.duration = int(
+                (run.finished_at - run.started_at).total_seconds() * 1000
+            )
+            self.db.commit()
+
+            yield {
+                "event": "done",
+                "data": {
+                    "run_id": run.id,
+                    "status": "completed",
+                    "outputs": final_output,
+                    "execution_log": result.get("execution_log", []),
+                    "duration": run.duration,
+                },
+            }
+
+        except Exception as e:
+            run.status = "failed"
+            run.error_message = str(e)
+            run.finished_at = datetime.utcnow()
+            if run.started_at:
+                run.duration = int(
+                    (run.finished_at - run.started_at).total_seconds() * 1000
+                )
+            self.db.commit()
+            logger.error(f"工作流流式执行失败: app_id={app_id}, error={e}", exc_info=True)
+            yield {"event": "error", "data": {"message": str(e)}}
 
     @staticmethod
     def nodes_iter(nodes_data):
@@ -940,6 +1639,7 @@ class WorkflowService:
 # ------------------------------------------------------------------
 # 工厂函数
 # ------------------------------------------------------------------
+
 
 def get_workflow_service(db: Session) -> WorkflowService:
     return WorkflowService(db)

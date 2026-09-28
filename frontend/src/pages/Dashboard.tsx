@@ -9,8 +9,8 @@ import {
   ArrowRightOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
-import { appsApi, AppData } from '../services/apps'
-import { knowledgeApi, KnowledgeBaseData } from '../services/knowledge'
+import { appsApi, AppData } from '@/services/apps'
+import { knowledgeApi, KnowledgeBaseData } from '@/services/knowledge'
 
 const { Title, Text } = Typography
 

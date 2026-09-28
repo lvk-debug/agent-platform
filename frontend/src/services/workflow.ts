@@ -2,6 +2,7 @@
  * 工作流 API 服务
  */
 import api from './api'
+import { useAuthStore } from '@/stores/auth'
 
 // ------------------------------------------------------------------
 // 类型定义
@@ -63,6 +64,27 @@ export interface WorkflowRunRequest {
   thread_id?: string
 }
 
+export interface LLMNodeRunRequest {
+  model_id: number
+  prompt?: string
+  user_message?: string
+  temperature?: number
+  max_tokens?: number
+  top_p?: number
+  variables?: Record<string, any>
+  output_type?: 'text' | 'structured'
+  output_schema?: Record<string, any>
+  output_variables?: Array<{ name: string; type: string; description?: string }>
+}
+
+export interface LLMNodeRunResponse {
+  content: string
+  reasoning_content?: string
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
+  model?: string
+  structured_output?: Record<string, any>
+}
+
 export interface WorkflowRunResponse {
   id: number
   workflow_id: number
@@ -119,20 +141,36 @@ export interface QuestionClassifierConfig {
   output_key: string
 }
 
+export interface LLMNodeInput {
+  name: string
+  type: string
+  required: boolean
+  description?: string
+}
+
+export interface LLMNodeOutput {
+  name: string
+  type: string
+  description?: string
+}
+
 export interface LLMNodeConfig {
   model_id?: number
   model?: string
   prompt?: string
-  system_prompt?: string
+  user_message?: string
   temperature?: number
   max_tokens?: number
   top_p?: number
   output_key?: string
+  inputs?: LLMNodeInput[]
+  output_type?: 'text' | 'structured'
+  output_schema?: Record<string, any>
+  output_variables?: LLMNodeOutput[]
   context?: LLMContextVariable[]
   memory?: LLMMemoryConfig
   vision?: boolean
   thinking_tag?: boolean
-  structured_output?: boolean
   retry_on_failure?: boolean
 }
 
@@ -149,8 +187,8 @@ export interface NodeTypeMeta {
 }
 
 export const NODE_TYPES: NodeTypeMeta[] = [
-  { type: 'start', label: '开始', description: '工作流入口，定义输入变量', icon: 'PlayCircleOutlined', color: '#52c41a' },
-  { type: 'end', label: '结束', description: '工作流出口，定义输出', icon: 'StopOutlined', color: '#ff4d4f' },
+  { type: 'start', label: '用户输入', description: '用于节点开始，定义输入变量', icon: 'PlayCircleOutlined', color: '#52c41a' },
+  { type: 'end', label: '直接回复', description: '设置回复内容，可引用上游变量', icon: 'StopOutlined', color: '#ff4d4f' },
   { type: 'llm', label: 'LLM', description: '调用大语言模型', icon: 'RobotOutlined', color: '#1677ff' },
   { type: 'knowledge_retrieval', label: '知识库', description: '从知识库检索相关文档', icon: 'BookOutlined', color: '#722ed1' },
   { type: 'condition', label: '条件分支', description: '根据条件分支执行', icon: 'BranchesOutlined', color: '#1677ff' },
@@ -180,6 +218,71 @@ export const workflowApi = {
   /** 执行工作流 */
   run: async (appId: number, request: WorkflowRunRequest): Promise<any> => {
     const response = await api.post(`/workflow/${appId}/run`, request)
+    return response.data
+  },
+
+  /** 流式执行工作流 (SSE) */
+  runStream: async function* (appId: number, request: WorkflowRunRequest) {
+    const token = useAuthStore.getState().token
+    const response = await fetch(`/api/v1/workflow/${appId}/run/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(request),
+    })
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: '请求失败' }))
+      yield { event: 'error', data: { message: error.detail || '请求失败' } }
+      return
+    }
+
+    const reader = response.body!.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let eventType = ''
+    let eventData = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+
+      // 解析 SSE 事件
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          eventType = line.slice(7).trim()
+        } else if (line.startsWith('data: ')) {
+          eventData = line.slice(6)
+        } else if (line === '' && eventType && eventData) {
+          try {
+            const data = JSON.parse(eventData)
+            yield { event: eventType, data }
+          } catch { /* ignore parse errors */ }
+          eventType = ''
+          eventData = ''
+        }
+      }
+    }
+
+    // 处理 buffer 中剩余的事件
+    if (eventType && eventData) {
+      try {
+        const data = JSON.parse(eventData)
+        yield { event: eventType, data }
+      } catch { /* ignore */ }
+    }
+  },
+
+  /** 单独运行 LLM 节点（调试用） */
+  runLLMNode: async (appId: number, request: LLMNodeRunRequest): Promise<LLMNodeRunResponse> => {
+    const response = await api.post(`/workflow/${appId}/llm-run`, request)
     return response.data
   },
 

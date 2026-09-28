@@ -2,12 +2,12 @@ import React, { useState, useEffect } from 'react'
 import { Card, Button, message, Spin, Row, Col, Space, Breadcrumb, Switch, Input, InputNumber, Collapse, Typography } from 'antd'
 import { SaveOutlined, SettingOutlined, CommentOutlined } from '@ant-design/icons'
 import { useParams, useNavigate, Link } from 'react-router-dom'
-import PromptEditor from '../components/PromptEditor'
-import VariableSettings from '../components/VariableSettings'
-import KnowledgeBaseSelector from '../components/KnowledgeBaseSelector'
-import ModelSelector from '../components/ModelSelector'
-import ModelParametersModal from '../components/ModelParameters'
-import { chatbotApi, ChatbotConfig, ModelParameters as ModelParametersType } from '../services/chatbot'
+import PromptEditor from '@/components/PromptEditor'
+import VariableSettings from '@/components/VariableSettings'
+import KnowledgeBaseSelector from '@/components/KnowledgeBaseSelector'
+import ModelSelector from '@/components/ModelSelector'
+import ModelParametersModal from '@/components/ModelParameters'
+import { chatbotApi, ChatbotConfig, ModelParameters as ModelParametersType } from '@/services/chatbot'
 
 const defaultParameters: ModelParametersType = {
   temperature: 0.7,

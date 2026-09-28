@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Drawer, List, Tag, Typography, Spin, Empty, Collapse, Button } from 'antd'
 import { FileTextOutlined, DownOutlined } from '@ant-design/icons'
-import { knowledgeApi, DocumentSegmentData } from '../services/knowledge'
+import { knowledgeApi, DocumentSegmentData } from '@/services/knowledge'
 
 const { Text, Paragraph } = Typography
 

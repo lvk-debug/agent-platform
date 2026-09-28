@@ -6,11 +6,13 @@ import {
   Table,
   Tag,
   Space,
+  Spin,
   Typography,
   Upload,
   App,
   Popconfirm,
   Descriptions,
+  Empty,
   Statistic,
   Row,
   Col,
@@ -35,14 +37,16 @@ import {
   LinkOutlined,
   SettingOutlined,
 } from '@ant-design/icons'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   knowledgeApi,
   KnowledgeBaseData,
   DocumentData,
-} from '../services/knowledge'
-import SegmentDrawer from '../components/SegmentDrawer'
-import SearchTestPanel from '../components/SearchTestPanel'
-import ChunkSettingDrawer from '../components/ChunkSettingDrawer'
+} from '@/services/knowledge'
+import SegmentDrawer from '@/components/SegmentDrawer'
+import SearchTestPanel from '@/components/SearchTestPanel'
+import ChunkSettingDrawer from '@/components/ChunkSettingDrawer'
 
 const { Title, Text } = Typography
 
@@ -66,6 +70,12 @@ const KnowledgeDetail: React.FC = () => {
   // 分片设置抽屉
   const [chunkDrawerVisible, setChunkDrawerVisible] = useState(false)
   const [chunkDoc, setChunkDoc] = useState<DocumentData | null>(null)
+
+  // 正文预览
+  const [contentModalVisible, setContentModalVisible] = useState(false)
+  const [contentDoc, setContentDoc] = useState<DocumentData | null>(null)
+  const [docContent, setDocContent] = useState('')
+  const [contentLoading, setContentLoading] = useState(false)
 
   // URL 爬取
   const [crawlModalVisible, setCrawlModalVisible] = useState(false)
@@ -178,6 +188,21 @@ const KnowledgeDetail: React.FC = () => {
     setSegmentDrawerVisible(true)
   }
 
+  const handleViewContent = async (doc: DocumentData) => {
+    setContentDoc(doc)
+    setContentModalVisible(true)
+    setContentLoading(true)
+    setDocContent('')
+    try {
+      const res = await knowledgeApi.getDocumentContent(kbId, doc.id)
+      setDocContent(res.data.content || '')
+    } catch {
+      message.error('获取文档正文失败')
+    } finally {
+      setContentLoading(false)
+    }
+  }
+
   const handleOpenChunkSetting = (doc: DocumentData) => {
     setChunkDoc(doc)
     setChunkDrawerVisible(true)
@@ -275,9 +300,16 @@ const KnowledgeDetail: React.FC = () => {
     {
       title: '操作',
       key: 'action',
-      width: 250,
+      width: 400,
       render: (_: any, record: DocumentData) => (
         <Space>
+          <Button
+            type="link"
+            icon={<FileTextOutlined />}
+            onClick={() => handleViewContent(record)}
+          >
+            预览正文
+          </Button>
           {record.status === 'parsed' && (
             <Button
               type="link"
@@ -464,6 +496,32 @@ const KnowledgeDetail: React.FC = () => {
           }}
         />
       )}
+
+      {/* 正文预览弹窗 */}
+      <Modal
+        title={`文档正文预览${contentDoc ? ` - ${contentDoc.name}` : ''}`}
+        open={contentModalVisible}
+        footer={null}
+        width={800}
+        onCancel={() => {
+          setContentModalVisible(false)
+          setContentDoc(null)
+        }}
+      >
+        <div style={{ maxHeight: '70vh', overflow: 'auto' }}>
+          {contentLoading ? (
+            <div className="text-center py-8">
+              <Spin />
+            </div>
+          ) : docContent ? (
+            <div className="markdown-body">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{docContent}</ReactMarkdown>
+            </div>
+          ) : (
+            <Empty description="暂无正文（文档尚未解析）" />
+          )}
+        </div>
+      </Modal>
 
       {/* 爬取 URL 弹窗 */}
       <Modal

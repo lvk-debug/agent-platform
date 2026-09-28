@@ -30,7 +30,7 @@ import {
   ModelProviderData,
   ModelData,
   CreateModelProviderData,
-} from '../services/models'
+} from '@/services/models'
 
 const { Title, Text } = Typography
 

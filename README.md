@@ -2,6 +2,8 @@
 
 一个功能完整的智能体平台，支持创建聊天助手、工作流和Agent应用，集成知识库、多种外部工具，并支持多渠道发布。
 
+> 📚 **开发者文档**：[文档索引](docs/README.md) · [架构总览](docs/ARCHITECTURE.md) · [数据库设计](docs/DATABASE.md) · [接口文档](docs/API.md) · [后端模块](docs/MODULES.md) · [前端架构](docs/FRONTEND.md) · [移动端](docs/MOBILE.md)
+
 ## 项目概述
 
 本平台旨在提供一个低代码、可视化的智能体开发环境，让用户能够快速构建、部署和管理AI应用。
@@ -38,22 +40,15 @@
 
 ## 技术架构
 
-### 前端
-- React 18 + TypeScript
-- Ant Design 5
-- Zustand (状态管理)
-- ReactFlow (工作流可视化)
-- Vite 5 (构建工具)
+| 层 | 技术栈 |
+|---|---|
+| 前端 | React 18 + TypeScript + Ant Design 5 + Zustand + ReactFlow + Vite 5 |
+| 后端 | FastAPI (Python 3.11+) + SQLAlchemy 2.0 + Pydantic v2 + Alembic + **LangGraph** |
+| 移动端 | React Native (Expo SDK 50) + TypeScript + Zustand + React Navigation |
+| 数据库 | SQLite (本地开发) / PostgreSQL；向量库 `sqlite-vec` / `Qdrant` |
+| 部署 | Docker Compose + Nginx 反向代理 |
 
-### 后端
-- FastAPI (Python 3.11+)
-- SQLAlchemy 2.0 + Pydantic v2
-- Alembic (数据库迁移)
-- SQLite (本地开发) / PostgreSQL + pgvector (生产环境)
-
-### 部署
-- Docker + Docker Compose
-- Nginx (反向代理)
+详细的分层结构、核心执行流程与设计决策见 **[架构总览](docs/ARCHITECTURE.md)**。
 
 ## 快速开始
 
@@ -91,6 +86,29 @@ pnpm dev
 
 访问应用: http://localhost:3000
 
+### 移动端启动
+
+```bash
+cd mobile
+
+# 安装依赖
+npm install
+
+# 指定后端地址（Android 模拟器默认用 10.0.2.2:8000）
+export API_BASE_URL=http://192.168.1.10:8000
+
+# 启动（语音模块需 development build，见 docs/MOBILE.md）
+npx expo start
+```
+
+后端需额外安装定时任务依赖：
+
+```bash
+cd backend && pip install "apscheduler>=3.10.4"
+```
+
+详见 [移动端开发文档](docs/MOBILE.md)。
+
 ### Docker部署
 
 ```bash
@@ -107,46 +125,34 @@ open http://localhost
 
 ```
 agent-platform/
-├── frontend/                    # 前端项目
-│   ├── src/
-│   │   ├── components/          # 组件
-│   │   │   ├── Layout/          # 布局组件
-│   │   │   ├── workflow/        # 工作流节点组件
-│   │   │   ├── PromptEditor     # 提示词编辑器
-│   │   │   ├── VariableSettings # 变量配置
-│   │   │   └── ModelSelector    # 模型选择器
-│   │   ├── pages/               # 页面
-│   │   │   ├── Apps.tsx         # 应用管理
-│   │   │   ├── ChatbotOrchestration.tsx  # 聊天助手编排
-│   │   │   ├── WorkflowOrchestration.tsx # 工作流编排
-│   │   │   ├── PublishManagement.tsx     # 发布管理
-│   │   │   ├── Knowledge.tsx    # 知识库管理
-│   │   │   ├── Tools.tsx        # 工具管理（含探索工具市场）
-│   │   │   └── Models.tsx       # 模型管理
-│   │   ├── services/            # API服务
-│   │   └── stores/              # 状态管理
-│   └── package.json
+├── frontend/                    # React 18 + TypeScript + Vite
+│   └── src/
+│       ├── pages/               # 页面（工作室/知识库/模型/工具/评估中心/工作助理）
+│       ├── components/          # 组件（Layout / workflow / workassistant）
+│       ├── services/            # Axios API 客户端（按领域划分）
+│       └── stores/              # Zustand 状态（auth，持久化到 localStorage）
 │
-├── backend/                     # 后端项目
-│   ├── app/
-│   │   ├── api/                 # API路由
-│   │   │   └── endpoints/       # 端点实现
-│   │   ├── models/              # 数据模型
-│   │   ├── schemas/             # Pydantic模型
-│   │   ├── services/            # 业务逻辑
-│   │   │   ├── llm.py           # LLM调用封装
-│   │   │   ├── knowledge.py     # 知识库服务
-│   │   │   ├── workflow.py      # 工作流引擎
-│   │   │   ├── publish.py       # 发布服务
-│   │   │   ├── tool_templates.py # 工具模板
-│   │   │   └── mcp_import.py    # MCP导入服务
-│   │   └── main.py              # 应用入口
-│   └── pyproject.toml
+├── backend/                     # FastAPI 项目
+│   └── app/
+│       ├── api/endpoints/       # REST 路由（12 个模块）
+│       ├── models/              # SQLAlchemy ORM（20+ 张表）
+│       ├── schemas/             # Pydantic 请求/响应模型
+│       ├── services/            # 业务逻辑（LLM / 知识库 / 工作流引擎 / 评估 …）
+│       └── core/                # 配置 / 数据库 / 安全 / 种子数据
 │
-├── docker/                      # Docker配置
-├── docs/                        # 文档
+├── docker/                      # Docker Compose + Nginx 配置
+├── mobile/                      # React Native (Expo) 移动端
+│   └── src/
+│       ├── screens/             # 登录/聊天/定时任务/应用选择/设置
+│       ├── components/          # 聊天界面组件与语音、附件浮层
+│       ├── hooks/               # 语音输入、图片上传
+│       ├── services/            # API 客户端与 SSE 流式对话
+│       └── stores/              # Zustand 状态
+├── docs/                        # 📚 开发者文档（见 docs/README.md）
 └── README.md
 ```
+
+完整目录说明见 [后端分层结构](docs/ARCHITECTURE.md#4-后端分层结构) 与 [前端目录结构](docs/FRONTEND.md#2-目录结构)。
 
 ## 功能详解
 
@@ -186,14 +192,18 @@ agent-platform/
 
 ## 环境变量
 
+配置优先级：**环境变量 > `.env.local` > `.env` > 代码默认值**
+
 ### 后端 (.env.local 或 .env)
 
 ```env
 # 数据库
 DATABASE_URL=sqlite:///./agent_platform.db
+VECTOR_STORE=sqlite_vector
 
 # 安全
 SECRET_KEY=your-secret-key
+ADMIN_PASSWORD=admin123
 
 # 日志
 LOG_LEVEL=INFO
@@ -201,13 +211,22 @@ LOG_LEVEL=INFO
 # LLM API Keys (按需配置)
 OPENAI_API_KEY=sk-xxx
 ANTHROPIC_API_KEY=sk-ant-xxx
+
+# 工作助理 Hermes（按需配置）
+HERMES_API_URL=http://host:8642/v1
+HERMES_API_KEY=your-api-key
+HERMES_MODEL=hermes-agent
 ```
+
+完整配置项说明见 [架构总览 §8 配置体系](docs/ARCHITECTURE.md#8-配置体系)，模板见 `backend/.env.example`。
 
 ### 前端
 
 ```env
 VITE_API_BASE_URL=/api/v1
 ```
+
+> 前端开发时 `/api` 由 Vite 代理到 `http://localhost:8000`，无需额外配置。
 
 ## 开发指南
 
@@ -217,6 +236,8 @@ VITE_API_BASE_URL=/api/v1
 2. **前端**: 在 `src/pages/` 添加页面组件
 3. **状态管理**: 在 `src/stores/` 添加状态管理
 4. **API服务**: 在 `src/services/` 添加API调用
+
+详细步骤见 [后端模块 §附录](docs/MODULES.md#附录新增一个业务模块的步骤) 与 [前端架构 §11.4](docs/FRONTEND.md#114-新增页面流程)。
 
 ### 数据库迁移
 

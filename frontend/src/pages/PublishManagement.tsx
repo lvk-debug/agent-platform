@@ -28,8 +28,8 @@ import {
   SendOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import { appsApi, AppData } from '../services/apps'
-import { publishApi, PublishConfig, PublishChannel } from '../services/publish'
+import { appsApi, AppData } from '@/services/apps'
+import { publishApi, PublishConfig, PublishChannel } from '@/services/publish'
 
 const { Title, Text, Paragraph } = Typography
 const { TabPane } = Tabs
